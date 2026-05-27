@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { RoomHeader } from '@/components/RoomHeader'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { QrModal } from '@/components/QrModal'
 import { apiFetch, getAccessToken, ensureToken } from '@/lib/auth'
 import { useTimer, fmtTime, fmtDuration } from '@/hooks/useTimer'
 import { useConfirm } from '@/hooks/useConfirm'
@@ -17,6 +18,7 @@ export function AdminPage({ roomId, onClose, onRoomClosed, onToast }: Props) {
   const [queues, setQueues] = useState<QueueInfo[]>([])
   const [stats, setStats] = useState<{ completed: number; avg: number } | null>(null)
   const [loading, setLoading] = useState(true)
+  const [showQr, setShowQr] = useState(false)
   const { confirm, dialogProps } = useConfirm()
 
   const closedRef = useRef(false)
@@ -168,13 +170,17 @@ export function AdminPage({ roomId, onClose, onRoomClosed, onToast }: Props) {
     navigator.clipboard.writeText(roomId).then(() => onToast('ID скопирован', 'info'))
   }
 
+  const qrUrl = `${location.origin}/?room=${roomId}`
+
   return (
     <div className="page-wrap">
       {dialogProps && <ConfirmDialog {...dialogProps} />}
+      {showQr && <QrModal url={qrUrl} onClose={() => setShowQr(false)} />}
       <RoomHeader
         roomId={roomId}
         label="Комната"
         onCopy={handleCopy}
+        onQr={() => setShowQr(true)}
         action={
           <button className="btn btn-danger btn-sm" onClick={handleCloseRoom}>Закрыть</button>
         }

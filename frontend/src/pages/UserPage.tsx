@@ -29,6 +29,18 @@ function formatPosition(posLabel: string, queueLabel: string): string {
   return posLabel + (queueLabel ? ` · очередь ${queueLabel}` : '')
 }
 
+function requestNotificationPermission() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission()
+  }
+}
+
+function notifyServing(ticket: string) {
+  if ('Notification' in window && Notification.permission === 'granted') {
+    new Notification(`Ваша очередь подошла · ${ticket}`)
+  }
+}
+
 export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: Props) {
   const [state, setState] = useState<RoomStateResponse | null>(null)
   const { confirm, dialogProps } = useConfirm()
@@ -37,6 +49,7 @@ export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: P
   const leftVoluntarily = useRef(false)
   const closedRef = useRef(false)
   const exitedRef = useRef(false)
+  const prevStatusRef = useRef<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pingTimer = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -64,6 +77,17 @@ export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: P
     setState(data)
     const ctx = data.client_context
     if (ctx?.ticket_label && ctx.ticket_label !== '--') hadTicket.current = true
+
+    if (
+      data.current_status === 'serving' &&
+      prevStatusRef.current !== 'serving' &&
+      ctx?.ticket_label &&
+      ctx.ticket_label !== '--'
+    ) {
+      notifyServing(ctx.ticket_label)
+    }
+    prevStatusRef.current = data.current_status
+
     if (hadTicket.current && ctx?.should_redirect && !exitedRef.current) {
       exitedRef.current = true
       if (!leftVoluntarily.current) onServedRef.current()
@@ -77,6 +101,10 @@ export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: P
       .then((d: RoomStateResponse | null) => { if (d) handleState(d) })
       .catch(() => {})
   }
+
+  useEffect(() => {
+    requestNotificationPermission()
+  }, [])
 
   useEffect(() => {
     let destroyed = false

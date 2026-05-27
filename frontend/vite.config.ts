@@ -21,6 +21,10 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      '/health': {
+        target: process.env.VITE_BACKEND_URL ?? 'http://localhost:8000',
+        changeOrigin: true,
+      },
     },
   },
   build: {

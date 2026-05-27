@@ -41,7 +41,7 @@ class AuthService:
             key=REFRESH_COOKIE,
             value=token,
             httponly=True,
-            secure=True,
+            secure=not self._settings.debug,
             samesite="strict",
             max_age=self._settings.refresh_token_expire_days * 86400,
             path="/api/v1/auth",

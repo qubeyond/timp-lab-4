@@ -86,6 +86,40 @@ async def healthcheck():
     return {"status": "ok"}
 
 
+@app.get("/health")
+async def health():
+    import redis.asyncio as aioredis
+    from sqlalchemy import text
+
+    settings: Settings = await container.get(Settings)
+    checks: dict[str, str] = {}
+
+    try:
+        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        await r.ping()
+        await r.aclose()
+        checks["redis"] = "ok"
+    except Exception:
+        checks["redis"] = "unavailable"
+
+    try:
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        eng = create_async_engine(settings.database_url)
+        async with eng.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        await eng.dispose()
+        checks["postgres"] = "ok"
+    except Exception:
+        checks["postgres"] = "unavailable"
+
+    ok = all(v == "ok" for v in checks.values())
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={"status": "ok" if ok else "degraded", **checks},
+    )
+
+
 @app.websocket("/ws/room/{room_id}")
 async def websocket_endpoint(
     websocket: WebSocket,

@@ -1,4 +1,8 @@
 {$CADDY_DOMAIN} {
+    handle /health {
+        respond 404
+    }
+
     handle /api/* {
         reverse_proxy {$BACKEND_UPSTREAM}
     }

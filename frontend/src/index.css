@@ -89,15 +89,15 @@ body {
   justify-content: space-between;
   width: 100%;
   max-width: 440px;
-  padding: 16px 0 0;
-  margin-bottom: 24px;
+  padding: 20px 0 0;
+  margin-bottom: 28px;
 }
-.room-label { font-size: .8rem; color: var(--text-3); font-weight: 500; }
+.room-label { font-size: .75rem; color: var(--text-3); font-weight: 500; margin-bottom: 2px; }
 .room-id {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 1rem;
+  font-size: .95rem;
   font-weight: 700;
   letter-spacing: .5px;
   font-family: 'Inter', monospace;
@@ -106,7 +106,7 @@ body {
   background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 3px 8px;
+  padding: 3px 10px;
   transition: background .15s, border-color .15s;
 }
 .room-id:hover { background: var(--border); border-color: var(--border2); }

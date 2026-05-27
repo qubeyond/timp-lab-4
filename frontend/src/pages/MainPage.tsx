@@ -1,4 +1,4 @@
-import { useState, KeyboardEvent } from 'react'
+import { useState, useEffect, KeyboardEvent } from 'react'
 import { Logo } from '@/components/Logo'
 import { apiFetch, ensureToken, setAccessToken, getOrCreateFingerprint } from '@/lib/auth'
 import type { TakeTicketResponse, RoomCreateResponse } from '@/types/api'
@@ -16,16 +16,20 @@ export function MainPage({ onJoinAsUser, onJoinAsAdmin }: Props) {
 
   const myFp = getOrCreateFingerprint()
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const roomFromQr = params.get('room')
+    if (roomFromQr) {
+      window.history.replaceState({}, '', '/')
+      joinRoom(roomFromQr.trim().toUpperCase())
+    }
+  }, [])
+
   function clearError() {
     setInlineError('')
   }
 
-  async function handleJoin() {
-    const rId = roomInput.trim().toUpperCase()
-    if (!rId || rId.length < 4) {
-      setInlineError('Введите корректный ID комнаты')
-      return
-    }
+  async function joinRoom(rId: string) {
     setJoinLoading(true)
     clearError()
     try {
@@ -50,6 +54,15 @@ export function MainPage({ onJoinAsUser, onJoinAsAdmin }: Props) {
     } finally {
       setJoinLoading(false)
     }
+  }
+
+  async function handleJoin() {
+    const rId = roomInput.trim().toUpperCase()
+    if (!rId || rId.length < 4) {
+      setInlineError('Введите корректный ID комнаты')
+      return
+    }
+    await joinRoom(rId)
   }
 
   async function handleCreate() {

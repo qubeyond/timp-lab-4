@@ -137,10 +137,15 @@ class RedisQueueRepo:
 
     async def pick_shortest_queue(self, room_id: str) -> str:
         labels = await self.get_queues(room_id)
+        async with self._r.pipeline(transaction=False) as pipe:
+            for label in labels:
+                pipe.llen(queue_list_key(room_id, label))
+                pipe.hgetall(queue_current_key(room_id, label))
+            results = await pipe.execute()
         lengths = []
-        for label in labels:
-            waiting = await self._r.llen(queue_list_key(room_id, label))
-            current = await self._r.hgetall(queue_current_key(room_id, label))
+        for i, _label in enumerate(labels):
+            waiting = results[i * 2]
+            current = results[i * 2 + 1]
             serving = 1 if current.get("status") == "serving" else 0
             lengths.append(waiting + serving)
         return labels[lengths.index(min(lengths))]
@@ -266,10 +271,21 @@ class RedisQueueRepo:
     async def get_state(self, room_id: str, user_id: str = "") -> dict:
         labels = await self.get_queues(room_id)
 
-        if not await self._r.exists(queue_current_key(room_id, labels[0])):
+        async with self._r.pipeline(transaction=False) as pipe:
+            pipe.exists(queue_current_key(room_id, labels[0]))
+            pipe.hgetall(user_queue_key(room_id))
+            pipe.get(room_avg_serve_key(room_id))
+            for label in labels:
+                pipe.hgetall(queue_current_key(room_id, label))
+                pipe.lrange(queue_list_key(room_id, label), 0, -1)
+            results = await pipe.execute()
+
+        exists = results[0]
+        if not exists:
             return {"room_closed": True, "room_id": room_id}
 
-        user_queue_map = await self._r.hgetall(user_queue_key(room_id))
+        user_queue_map = results[1]
+        avg_raw = results[2]
         user_label = user_queue_map.get(user_id)
 
         queue_infos = []
@@ -277,14 +293,16 @@ class RedisQueueRepo:
         my_status, my_elapsed = "waiting", 0
         global_elapsed = 0
 
-        for label in labels:
-            current = await self._r.hgetall(queue_current_key(room_id, label))
-            users_in_q = await self._r.lrange(queue_list_key(room_id, label), 0, -1)
-            tickets = (
-                await self._r.hmget(queue_hash_key(room_id, label), users_in_q)
-                if users_in_q
-                else []
-            )
+        per_queue_offset = 3
+        for i, label in enumerate(labels):
+            current = results[per_queue_offset + i * 2]
+            users_in_q = results[per_queue_offset + i * 2 + 1]
+
+            if users_in_q:
+                tickets = await self._r.hmget(queue_hash_key(room_id, label), users_in_q)
+            else:
+                tickets = []
+
             queue_list = [
                 {"user_id": u, "ticket": t} for u, t in zip(users_in_q, tickets, strict=False) if t
             ]
@@ -326,7 +344,6 @@ class RedisQueueRepo:
                         my_elapsed = 0
                         break
 
-        avg_raw = await self._r.get(room_avg_serve_key(room_id))
         avg_serve = int(avg_raw) if avg_raw else None
 
         return {

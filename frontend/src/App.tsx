@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { MainPage } from '@/pages/MainPage'
 import { UserPage } from '@/pages/UserPage'
 import { AdminPage } from '@/pages/AdminPage'
+import { ErrorPage } from '@/pages/ErrorPage'
 import { ToastContainer } from '@/components/ToastContainer'
 import { useToast } from '@/hooks/useToast'
 import {
@@ -15,16 +16,31 @@ import {
 import type { TakeTicketResponse } from '@/types/api'
 
 type Page = 'main' | 'user' | 'admin'
+type AppState = 'loading' | 'ok' | 'unavailable' | '404' | 'error'
 
 export default function App() {
   const [page, setPage] = useState<Page>('main')
   const [roomId, setRoomId] = useState('')
-  const [restoring, setRestoring] = useState(true)
+  const [appState, setAppState] = useState<AppState>('loading')
   const { toasts, addToast, removeToast } = useToast()
 
   useEffect(() => {
-    restoreSession().finally(() => setRestoring(false))
+    checkHealth()
   }, [])
+
+  async function checkHealth() {
+    try {
+      const res = await fetch('/health')
+      if (res.ok) {
+        setAppState('ok')
+        restoreSession()
+      } else {
+        setAppState('unavailable')
+      }
+    } catch {
+      setAppState('unavailable')
+    }
+  }
 
   async function restoreSession() {
     const savedRoom = localStorage.getItem(ROOM_KEY)
@@ -93,7 +109,36 @@ export default function App() {
     goMain()
   }
 
-  if (restoring) return null
+  if (appState === 'loading') return null
+
+  if (appState === 'unavailable') {
+    return (
+      <ErrorPage
+        title="Сервис временно недоступен"
+        message="Ведутся технические работы. Пожалуйста, попробуйте позже."
+      />
+    )
+  }
+
+  if (appState === '404') {
+    return (
+      <ErrorPage
+        code={404}
+        title="Страница не найдена"
+        message="Такой страницы не существует. Возможно, ссылка устарела."
+      />
+    )
+  }
+
+  if (appState === 'error') {
+    return (
+      <ErrorPage
+        title="Что-то пошло не так"
+        message="Произошла непредвиденная ошибка. Попробуйте обновить страницу."
+        onRetry={() => window.location.reload()}
+      />
+    )
+  }
 
   return (
     <>
