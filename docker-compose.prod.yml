@@ -5,6 +5,10 @@ services:
   frontend:
     build:
       target: builder
+    # В проде фронт — одноразовая build-задача: собрал dist в volume и вышел.
+    # restart:always из базового compose рестартил бы её вечно (и Caddy
+    # бесконечно ждал бы service_completed_successfully) — поэтому "no".
+    restart: "no"
     ports: []
     volumes:
       - frontend_dist:/app/dist
