@@ -17,12 +17,40 @@ def queue_counter_key(room_id: str, label: str) -> str:
     return f"room:{room_id}:queue:{label}:counter"
 
 
+def queue_status_key(room_id: str, label: str) -> str:
+    # user_id -> статус ожидающего талона (waiting/on_way/no_show)
+    return f"room:{room_id}:queue:{label}:status"
+
+
+def queue_code_key(room_id: str, label: str) -> str:
+    return f"room:{room_id}:queue:{label}:code"
+
+
+def room_codes_key(room_id: str) -> str:
+    # обратный индекс: code -> label, для входа по коду очереди
+    return f"room:{room_id}:codes"
+
+
+def room_flags_key(room_id: str) -> str:
+    # is_open / balancer
+    return f"room:{room_id}:flags"
+
+
 def room_queues_key(room_id: str) -> str:
     return f"room:{room_id}:queues"
 
 
 def room_owner_key(room_id: str) -> str:
     return f"room:{room_id}:owner"
+
+
+def room_admins_key(room_id: str) -> str:
+    # set из fingerprint-ов со-администраторов (без владельца)
+    return f"room:{room_id}:admins"
+
+
+def room_invite_key(room_id: str, token: str) -> str:
+    return f"room:{room_id}:invite:{token}"
 
 
 def user_queue_key(room_id: str) -> str:

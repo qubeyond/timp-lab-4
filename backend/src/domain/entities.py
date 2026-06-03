@@ -6,6 +6,14 @@ MAX_QUEUES = 10
 DEFAULT_QUEUE = "A"
 ROOM_ID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 ROOM_ID_LENGTH = 6
+QUEUE_CODE_LENGTH = 4
+
+# Статусы ожидающего талона. serving не входит — приём отслеживается через
+# Queue.serving. on_way/no_show — самоинформирование посетителя для админа.
+TICKET_WAITING = "waiting"
+TICKET_ON_WAY = "on_way"
+TICKET_NO_SHOW = "no_show"
+TICKET_STATUSES = {TICKET_WAITING, TICKET_ON_WAY, TICKET_NO_SHOW}
 
 
 @dataclass(frozen=True)
@@ -35,6 +43,7 @@ class Ticket:
     user_id: str
     queue_label: str
     room_id: str
+    status: str = TICKET_WAITING
 
     @staticmethod
     def build_num(label: str, count: int) -> str:
@@ -49,9 +58,32 @@ class Queue:
     serving: Ticket | None = None
     serving_since: datetime | None = None
     ticket_counter: int = 0
+    # Короткий код для прямого входа в очередь (VIP-сценарий, балансировщик off).
+    code: str = ""
 
     def total_length(self) -> int:
         return len(self.waiting) + (1 if self.serving else 0)
+
+    def set_status(self, user_id: str, status: str) -> Ticket | None:
+        # Статус ставится и ожидающему, и вызванному (serving) талону —
+        # «Я иду / Не приду» актуальны именно когда посетителя вызвали.
+        if self.serving is not None and self.serving.user_id == user_id:
+            self.serving.status = status
+            return self.serving
+        ticket = next((t for t in self.waiting if t.user_id == user_id), None)
+        if ticket is not None:
+            ticket.status = status
+        return ticket
+
+    def move_ticket(self, user_id: str, to_index: int) -> bool:
+        """Переставить ожидающего на новую позицию внутри очереди (0-based)."""
+        idx = next((i for i, t in enumerate(self.waiting) if t.user_id == user_id), None)
+        if idx is None:
+            return False
+        ticket = self.waiting.pop(idx)
+        to_index = max(0, min(to_index, len(self.waiting)))
+        self.waiting.insert(to_index, ticket)
+        return True
 
     def has_user(self, user_id: str) -> bool:
         in_waiting = any(t.user_id == user_id for t in self.waiting)
@@ -132,6 +164,12 @@ class Room:
     owner_id: str
     queue_labels: list[str] = field(default_factory=list)
     closed: bool = False
+    # Приём заявок открыт. Закрытая комната существует (по ссылке видна), но
+    # талоны брать нельзя, пока админ не откроет вход.
+    is_open: bool = True
+    # Балансировщик распределяет новых по самой короткой очереди. Если выключен —
+    # посетитель попадает только в явно выбранную очередь (по коду/метке).
+    balancer_enabled: bool = True
 
     def is_closed(self) -> bool:
         return self.closed

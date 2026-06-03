@@ -1,7 +1,9 @@
 import logging
+import secrets
 
 from fastapi import HTTPException
 
+from src.domain.entities import TICKET_STATUSES
 from src.domain.repositories import EventPublisher, QueueRepository, TicketRepository
 from src.services.auth import AuthService
 from src.services.dto import QueueLeft, TicketTaken
@@ -23,7 +25,11 @@ class VisitorService:
         self._pub = publisher
 
     async def take_ticket(
-        self, room_id: str, queue_label_hint: str | None, user_id: str
+        self,
+        room_id: str,
+        queue_label_hint: str | None,
+        user_id: str,
+        queue_code: str | None = None,
     ) -> TicketTaken:
         if not await self._qr.room_exists(room_id):
             raise HTTPException(status_code=404, detail="Комната не существует")
@@ -33,6 +39,15 @@ class VisitorService:
         if owner == user_id:
             token = self._auth.create_token(user_id, role="admin", room_id=room_id)
             return TicketTaken(is_admin=True, room_id=room_id, access_token=token)
+
+        flags = await self._qr.get_room_flags(room_id)
+
+        # Код очереди (VIP-вход) сразу определяет конкретную метку.
+        if queue_code:
+            label_by_code = await self._qr.find_label_by_code(room_id, queue_code)
+            if label_by_code is None:
+                raise HTTPException(status_code=404, detail="Неверный код очереди")
+            queue_label_hint = label_by_code
 
         # Лок на комнату: иначе параллельные входы читают одно состояние,
         # выбирают одну очередь и затирают талоны друг друга (теряются люди).
@@ -51,10 +66,18 @@ class VisitorService:
                         position=pos,
                     )
 
+            # Приём закрыт — новые талоны не выдаём (но уже стоящие выше прошли).
+            if not flags["is_open"]:
+                raise HTTPException(status_code=403, detail="Приём заявок закрыт")
+
             if queue_label_hint:
                 queue = next((q for q in queues if q.label == queue_label_hint), None)
                 if queue is None:
                     raise HTTPException(status_code=404, detail="Очередь не существует")
+            elif not flags["balancer_enabled"]:
+                # VIP-режим (балансировщик off): по общей ссылке комнаты, без кода
+                # очереди, кидаем в случайную очередь, а не в тупик.
+                queue = secrets.choice(queues)
             else:
                 queue = min(queues, key=lambda q: q.total_length())
 
@@ -74,6 +97,21 @@ class VisitorService:
             ticket=ticket.num,
             position=position,
         )
+
+    async def set_status(self, room_id: str, user_id: str, status: str) -> QueueLeft:
+        """Посетитель сообщает статус (в пути / не приду) для своего талона."""
+        if status not in TICKET_STATUSES:
+            raise HTTPException(status_code=400, detail="Неизвестный статус")
+
+        async with self._qr.lock(room_id):
+            queues = await self._qr.load_all(room_id)
+            for queue in queues:
+                if queue.set_status(user_id, status) is not None:
+                    await self._qr.save(queue)
+                    break
+
+        await self._pub.publish(room_id, {"type": "update"})
+        return QueueLeft(status=status)
 
     async def leave_queue(self, room_id: str, user_id: str) -> QueueLeft:
         async with self._qr.lock(room_id):

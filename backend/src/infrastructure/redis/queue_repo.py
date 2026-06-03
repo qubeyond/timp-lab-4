@@ -5,19 +5,36 @@ from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 
-from src.domain.entities import DEFAULT_QUEUE, ROOM_ID_ALPHABET, ROOM_ID_LENGTH, Queue, Ticket
+from src.domain.entities import (
+    DEFAULT_QUEUE,
+    QUEUE_CODE_LENGTH,
+    ROOM_ID_ALPHABET,
+    ROOM_ID_LENGTH,
+    TICKET_WAITING,
+    Queue,
+    Ticket,
+)
 from src.infrastructure.redis.client import (
+    queue_code_key,
     queue_counter_key,
     queue_current_key,
     queue_hash_key,
     queue_list_key,
+    queue_status_key,
+    room_admins_key,
     room_avg_serve_key,
+    room_codes_key,
+    room_flags_key,
+    room_invite_key,
     room_lock_key,
     room_owner_key,
     room_queues_key,
     room_serve_count_key,
     user_queue_key,
 )
+
+# TTL для одноразовой ссылки-приглашения со-администратора.
+_INVITE_TTL = 3600
 
 # Параметры блокировки на комнату. timeout — авто-снятие, если держатель упал;
 # blocking_timeout — сколько ждём очереди на лок, прежде чем сдаться.
@@ -27,6 +44,14 @@ _LOCK_BLOCKING_TIMEOUT = 5.0
 
 def generate_room_id() -> str:
     return "".join(secrets.choice(ROOM_ID_ALPHABET) for _ in range(ROOM_ID_LENGTH))
+
+
+def generate_queue_code() -> str:
+    return "".join(secrets.choice(ROOM_ID_ALPHABET) for _ in range(QUEUE_CODE_LENGTH))
+
+
+def generate_invite_token() -> str:
+    return secrets.token_urlsafe(24)
 
 
 class RedisQueueRepository:
@@ -61,7 +86,8 @@ class RedisQueueRepository:
             pipe.hgetall(ck)
             pipe.lrange(queue_list_key(room_id, label), 0, -1)
             pipe.get(queue_counter_key(room_id, label))
-            exists, current, user_ids, counter = await pipe.execute()
+            pipe.get(queue_code_key(room_id, label))
+            exists, current, user_ids, counter, code = await pipe.execute()
 
         if not exists:
             return None
@@ -70,10 +96,17 @@ class RedisQueueRepository:
 
         if user_ids:
             nums = await self._r.hmget(queue_hash_key(room_id, label), user_ids)
-            for user_id, num in zip(user_ids, nums, strict=False):
+            statuses = await self._r.hmget(queue_status_key(room_id, label), user_ids)
+            for user_id, num, status in zip(user_ids, nums, statuses, strict=False):
                 if num:
                     waiting.append(
-                        Ticket(num=num, user_id=user_id, queue_label=label, room_id=room_id)
+                        Ticket(
+                            num=num,
+                            user_id=user_id,
+                            queue_label=label,
+                            room_id=room_id,
+                            status=status or TICKET_WAITING,
+                        )
                     )
 
         serving: Ticket | None = None
@@ -85,6 +118,7 @@ class RedisQueueRepository:
                 user_id=current.get("active_user_id", ""),
                 queue_label=label,
                 room_id=room_id,
+                status=current.get("serving_status") or TICKET_WAITING,
             )
             raw_ts = current.get("started_at", "")
 
@@ -99,6 +133,7 @@ class RedisQueueRepository:
             serving=serving,
             serving_since=serving_since,
             ticket_counter=int(counter) if counter else 0,
+            code=code or "",
         )
 
     async def load_all(self, room_id: str) -> list[Queue]:
@@ -119,9 +154,11 @@ class RedisQueueRepository:
     async def save(self, queue: Queue) -> None:
         lk = queue_list_key(queue.room_id, queue.label)
         hk = queue_hash_key(queue.room_id, queue.label)
+        sk = queue_status_key(queue.room_id, queue.label)
         uqk = user_queue_key(queue.room_id)
         ck = queue_current_key(queue.room_id, queue.label)
         ck_val = queue_counter_key(queue.room_id, queue.label)
+        code_k = queue_code_key(queue.room_id, queue.label)
 
         serving = queue.serving
 
@@ -140,22 +177,30 @@ class RedisQueueRepository:
             "status": "serving" if serving else "waiting",
             "ticket": serving.num if serving else "",
             "active_user_id": serving.user_id if serving else "",
+            "serving_status": serving.status if serving else "",
             "started_at": started_at,
         }
 
         async with self._r.pipeline(transaction=True) as pipe:
             pipe.delete(lk)
             pipe.delete(hk)
+            pipe.delete(sk)
 
             for ticket in queue.waiting:
                 pipe.rpush(lk, ticket.user_id)
                 pipe.hset(hk, ticket.user_id, ticket.num)
+                pipe.hset(sk, ticket.user_id, ticket.status)
                 pipe.hset(uqk, ticket.user_id, queue.label)
 
             pipe.hset(ck, mapping=current_mapping)
             pipe.set(ck_val, queue.ticket_counter, ex=self._ttl)
+            if queue.code:
+                pipe.set(code_k, queue.code, ex=self._ttl)
+                pipe.hset(room_codes_key(queue.room_id), queue.code, queue.label)
+                pipe.expire(room_codes_key(queue.room_id), self._ttl)
             pipe.expire(lk, self._ttl)
             pipe.expire(hk, self._ttl)
+            pipe.expire(sk, self._ttl)
             pipe.expire(uqk, self._ttl)
             pipe.expire(ck, self._ttl)
 
@@ -168,11 +213,17 @@ class RedisQueueRepository:
             await self._r.expire(room_queues_key(queue.room_id), self._ttl)
 
     async def delete(self, room_id: str, label: str) -> None:
+        # Снять код очереди из обратного индекса перед удалением.
+        code = await self._r.get(queue_code_key(room_id, label))
         async with self._r.pipeline(transaction=True) as pipe:
             pipe.delete(queue_list_key(room_id, label))
             pipe.delete(queue_hash_key(room_id, label))
+            pipe.delete(queue_status_key(room_id, label))
             pipe.delete(queue_current_key(room_id, label))
             pipe.delete(queue_counter_key(room_id, label))
+            pipe.delete(queue_code_key(room_id, label))
+            if code:
+                pipe.hdel(room_codes_key(room_id), code)
             pipe.lrem(room_queues_key(room_id), 0, label)
             await pipe.execute()
 
@@ -180,24 +231,76 @@ class RedisQueueRepository:
         labels = await self._r.lrange(room_queues_key(room_id), 0, -1) or [DEFAULT_QUEUE]
         keys = [
             room_owner_key(room_id),
+            room_admins_key(room_id),
             room_queues_key(room_id),
             user_queue_key(room_id),
             room_avg_serve_key(room_id),
             room_serve_count_key(room_id),
+            room_codes_key(room_id),
+            room_flags_key(room_id),
         ]
 
         for label in labels:
             keys += [
                 queue_list_key(room_id, label),
                 queue_hash_key(room_id, label),
+                queue_status_key(room_id, label),
                 queue_current_key(room_id, label),
                 queue_counter_key(room_id, label),
+                queue_code_key(room_id, label),
             ]
 
         async with self._r.pipeline() as pipe:
             for k in keys:
                 pipe.delete(k)
             await pipe.execute()
+
+    # ── Флаги комнаты (приём открыт / балансировщик) ──
+
+    async def get_room_flags(self, room_id: str) -> dict:
+        flags = await self._r.hgetall(room_flags_key(room_id))
+        return {
+            "is_open": flags.get("is_open", "1") == "1",
+            "balancer_enabled": flags.get("balancer", "1") == "1",
+        }
+
+    async def set_room_flags(
+        self, room_id: str, *, is_open: bool | None = None, balancer_enabled: bool | None = None
+    ) -> None:
+        mapping: dict[str, str] = {}
+        if is_open is not None:
+            mapping["is_open"] = "1" if is_open else "0"
+        if balancer_enabled is not None:
+            mapping["balancer"] = "1" if balancer_enabled else "0"
+        if not mapping:
+            return
+        await self._r.hset(room_flags_key(room_id), mapping=mapping)
+        await self._r.expire(room_flags_key(room_id), self._ttl)
+
+    async def find_label_by_code(self, room_id: str, code: str) -> str | None:
+        return await self._r.hget(room_codes_key(room_id), code.upper())
+
+    # ── Со-администраторы и приглашения ──
+
+    async def is_admin(self, room_id: str, user_id: str) -> bool:
+        if await self._r.get(room_owner_key(room_id)) == user_id:
+            return True
+        return bool(await self._r.sismember(room_admins_key(room_id), user_id))
+
+    async def add_admin(self, room_id: str, user_id: str) -> None:
+        await self._r.sadd(room_admins_key(room_id), user_id)
+        await self._r.expire(room_admins_key(room_id), self._ttl)
+
+    async def remove_admin(self, room_id: str, user_id: str) -> None:
+        await self._r.srem(room_admins_key(room_id), user_id)
+
+    async def create_invite(self, room_id: str, token: str) -> None:
+        await self._r.set(room_invite_key(room_id, token), "1", ex=_INVITE_TTL)
+
+    async def consume_invite(self, room_id: str, token: str) -> bool:
+        # Одноразовость: атомарно удаляем ключ, успех = приглашение было валидным.
+        deleted = await self._r.delete(room_invite_key(room_id, token))
+        return bool(deleted)
 
     async def get_avg_serve(self, room_id: str) -> int | None:
         val = await self._r.get(room_avg_serve_key(room_id))

@@ -6,6 +6,13 @@ import { Card, StatRow } from '@/components/ui/Card'
 import { apiFetch, getAccessToken, ensureToken } from '@/lib/auth'
 import { useTimer, fmtTime, fmtDuration } from '@/hooks/useTimer'
 import { useConfirm } from '@/hooks/useConfirm'
+import {
+  notificationsSupported,
+  notificationPermission,
+  requestNotificationPermission,
+  showNotification,
+  clearTicketNotification,
+} from '@/lib/notifications'
 import type { RoomStateResponse, WsMessage } from '@/types/api'
 
 interface Props {
@@ -31,20 +38,18 @@ function formatPosition(posLabel: string, queueLabel: string): string {
   return posLabel + (queueLabel ? ` · очередь ${queueLabel}` : '')
 }
 
-function requestNotificationPermission() {
-  if ('Notification' in window && Notification.permission === 'default') {
-    Notification.requestPermission()
-  }
-}
-
 function notifyServing(ticket: string) {
-  if ('Notification' in window && Notification.permission === 'granted') {
-    new Notification(`Ваша очередь подошла · ${ticket}`)
-  }
+  // Висящее (несмахиваемое) уведомление с краткой информацией о талоне.
+  void showNotification({
+    title: 'Ваша очередь подошла!',
+    body: `Талон ${ticket} — подойдите к администратору`,
+    sticky: true,
+  })
 }
 
 export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: Props) {
   const [state, setState] = useState<RoomStateResponse | null>(null)
+  const [notifPerm, setNotifPerm] = useState<NotificationPermission>(notificationPermission())
   const { confirm, dialogProps } = useConfirm()
 
   const hadTicket = useRef(false)
@@ -104,9 +109,32 @@ export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: P
       .catch(() => {})
   }
 
+  // Очистить висящее уведомление, когда сессия пользователя завершилась.
   useEffect(() => {
-    requestNotificationPermission()
+    return () => { void clearTicketNotification() }
   }, [])
+
+  async function handleEnableNotifications() {
+    const perm = await requestNotificationPermission()
+    setNotifPerm(perm)
+    if (perm === 'granted') {
+      onToast('Уведомления включены', 'success')
+    } else if (perm === 'denied') {
+      onToast('Уведомления заблокированы в браузере', 'error')
+    }
+  }
+
+  async function handleTestNotification() {
+    if (notificationPermission() !== 'granted') {
+      await handleEnableNotifications()
+      if (notificationPermission() !== 'granted') return
+    }
+    void showNotification({
+      title: 'Проверка уведомлений',
+      body: 'Так вы узнаете, когда подойдёт ваша очередь.',
+      sticky: false,
+    })
+  }
 
   useEffect(() => {
     let destroyed = false
@@ -162,6 +190,17 @@ export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: P
       if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null }
     }
   }, [])
+
+  async function handleSetStatus(status: 'on_way' | 'no_show') {
+    try {
+      const res = await apiFetch('/api/v1/queue/status', {
+        method: 'POST',
+        body: JSON.stringify({ room_id: roomId, status }),
+      })
+      if (!res.ok) { onToast('Не удалось обновить статус', 'error'); return }
+      onToast(status === 'on_way' ? 'Отметили: вы в пути' : 'Отметили: вы не придёте', 'success')
+    } catch (e) { onToast((e as Error).message, 'error') }
+  }
 
   async function handleLeave() {
     if (!await confirm({
@@ -228,6 +267,55 @@ export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: P
             {state?.avg_serve_seconds ? fmtDuration(state.avg_serve_seconds) : '—'}
           </StatRow>
         </Card>
+
+        {ctx && isServing && (
+          <Card title="Вас вызвали — сообщите администратору">
+            <div className="btn-row">
+              <Button
+                variant={ctx.ticket_status === 'on_way' ? 'success-solid' : 'secondary'}
+                onClick={() => handleSetStatus('on_way')}
+              >
+                Я иду
+              </Button>
+              <Button
+                variant={ctx.ticket_status === 'no_show' ? 'danger-solid' : 'secondary'}
+                onClick={() => handleSetStatus('no_show')}
+              >
+                Не приду
+              </Button>
+            </div>
+          </Card>
+        )}
+
+        {notificationsSupported() && (
+          <Card title="Уведомления">
+            {notifPerm === 'granted' ? (
+              <>
+                <p className="toggle-hint" style={{ marginBottom: 10 }}>
+                  Уведомления включены. Мы пришлём оповещение, когда подойдёт ваша очередь.
+                </p>
+                <Button variant="secondary" onClick={handleTestNotification}>
+                  Проверить уведомление
+                </Button>
+              </>
+            ) : notifPerm === 'denied' ? (
+              <p className="toggle-hint">
+                Уведомления заблокированы. Разрешите их в настройках браузера, чтобы не пропустить
+                вызов.
+              </p>
+            ) : (
+              <>
+                <p className="toggle-hint" style={{ marginBottom: 10 }}>
+                  Включите уведомления, чтобы получить оповещение, когда подойдёт ваша очередь —
+                  даже если вкладка свёрнута.
+                </p>
+                <Button variant="primary" onClick={handleEnableNotifications}>
+                  Включить уведомления
+                </Button>
+              </>
+            )}
+          </Card>
+        )}
       </div>
     </div>
   )

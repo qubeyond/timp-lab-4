@@ -1,0 +1,11 @@
+{
+  "name": "Электронная очередь",
+  "short_name": "Очередь",
+  "description": "Сервис электронной очереди для живых мероприятий",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f4ef",
+  "theme_color": "#f5f4ef",
+  "lang": "ru",
+  "icons": []
+}

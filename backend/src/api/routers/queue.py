@@ -6,7 +6,12 @@ from fastapi import APIRouter, Depends, Request
 
 from src.api.deps import get_current_user
 from src.api.limiter import limiter
-from src.api.schemas.queue import JoinRequest, LeaveQueueResponse, TakeTicketResponse
+from src.api.schemas.queue import (
+    JoinRequest,
+    LeaveQueueResponse,
+    StatusRequest,
+    TakeTicketResponse,
+)
 from src.services.visitor import VisitorService
 
 router = APIRouter(prefix="/queue", tags=["queue"])
@@ -22,7 +27,10 @@ async def take_ticket(
     visitor_service: FromDishka[VisitorService],
 ):
     result = await visitor_service.take_ticket(
-        payload.room_id.upper(), payload.queue_label, user["sub"]
+        payload.room_id.upper(),
+        payload.queue_label,
+        user["sub"],
+        queue_code=payload.queue_code,
     )
 
     return TakeTicketResponse(
@@ -45,5 +53,19 @@ async def leave_queue(
     visitor_service: FromDishka[VisitorService],
 ):
     result = await visitor_service.leave_queue(payload.room_id.upper(), user["sub"])
+
+    return LeaveQueueResponse(status=result.status)
+
+
+@router.post("/status", response_model=LeaveQueueResponse)
+@limiter.limit("30/minute")
+@inject
+async def set_status(
+    request: Request,
+    payload: StatusRequest,
+    user: Annotated[dict, Depends(get_current_user)],
+    visitor_service: FromDishka[VisitorService],
+):
+    result = await visitor_service.set_status(payload.room_id.upper(), user["sub"], payload.status)
 
     return LeaveQueueResponse(status=result.status)

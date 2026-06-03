@@ -1,4 +1,4 @@
-import { useState, useEffect, KeyboardEvent } from 'react'
+import { useState, useEffect, useRef, KeyboardEvent } from 'react'
 import { Logo } from '@/components/Logo'
 import { Card } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
@@ -15,34 +15,82 @@ export function MainPage({ onJoinAsUser, onJoinAsAdmin }: Props) {
   const [joinLoading, setJoinLoading] = useState(false)
   const [createLoading, setCreateLoading] = useState(false)
   const [inlineError, setInlineError] = useState('')
+  // Экран ожидания закрытой комнаты — храним и код очереди, чтобы retry не терял VIP-вход.
+  const [closedRoom, setClosedRoom] = useState<{ room: string; code?: string } | null>(null)
+
+  // Гард от повторного запуска: StrictMode в dev вызывает эффект дважды, а
+  // ссылка-приглашение одноразовая — второй вызов «съел» бы её и упал.
+  const autoJoinDone = useRef(false)
 
   useEffect(() => {
+    if (autoJoinDone.current) return
     const params = new URLSearchParams(window.location.search)
     const roomFromQr = params.get('room')
-    if (roomFromQr) {
-      window.history.replaceState({}, '', '/')
-      joinRoom(roomFromQr.trim().toUpperCase())
+    const codeFromQr = params.get('code') // прямой вход в конкретную очередь (VIP)
+    const inviteFromQr = params.get('invite') // приглашение со-администратора
+    if (!roomFromQr) return
+    autoJoinDone.current = true
+    window.history.replaceState({}, '', '/')
+    if (inviteFromQr) {
+      acceptInvite(roomFromQr.trim().toUpperCase(), inviteFromQr.trim())
+    } else {
+      joinRoom(roomFromQr.trim().toUpperCase(), codeFromQr?.trim().toUpperCase() || undefined)
     }
   }, [])
+
+  async function acceptInvite(rId: string, token: string) {
+    setJoinLoading(true)
+    setInlineError('')
+    try {
+      await ensureToken()
+      const res = await apiFetch('/api/v1/admin/accept-invite', {
+        method: 'POST',
+        body: JSON.stringify({ room_id: rId, token }),
+      })
+      const data = await res.json() as { detail?: string; access_token?: string; room_id?: string }
+      if (!res.ok || !data.access_token) {
+        setInlineError(data.detail || 'Приглашение недействительно')
+        return
+      }
+      setAccessToken(data.access_token)
+      onJoinAsAdmin(data.room_id || rId)
+    } catch (e) {
+      setInlineError((e as Error).message)
+    } finally {
+      setJoinLoading(false)
+    }
+  }
 
   function clearError() {
     setInlineError('')
   }
 
-  async function joinRoom(rId: string) {
+  async function joinRoom(rId: string, code?: string) {
     setJoinLoading(true)
-    clearError()
+    setInlineError('')
     try {
       await ensureToken()
+      const body: { room_id: string; queue_code?: string } = { room_id: rId }
+      if (code) body.queue_code = code
       const res = await apiFetch('/api/v1/queue/ticket', {
         method: 'POST',
-        body: JSON.stringify({ room_id: rId }),
+        body: JSON.stringify(body),
       })
       const data: TakeTicketResponse = await res.json()
       if (!res.ok) {
-        setInlineError((data as { detail?: string }).detail || 'Комната не найдена')
+        const detail = (data as { detail?: string }).detail || ''
+        // Приём закрыт — держим экран ожидания, сохраняя код очереди для retry.
+        if (res.status === 403 && detail.toLowerCase().includes('закрыт')) {
+          setClosedRoom({ room: rId, code })
+          return
+        }
+        // Любая другая ошибка — уходим на главную с сообщением.
+        setClosedRoom(null)
+        setInlineError(detail || 'Комната не найдена')
         return
       }
+      // Успех: комната открыта, талон получен — покидаем экран ожидания.
+      setClosedRoom(null)
       if (data.is_admin && data.access_token) {
         setAccessToken(data.access_token)
         onJoinAsAdmin(rId)
@@ -70,6 +118,8 @@ export function MainPage({ onJoinAsUser, onJoinAsAdmin }: Props) {
     clearError()
     try {
       await ensureToken()
+      // Комната создаётся открытой со включённым балансировщиком;
+      // тонкая настройка — в панели администратора.
       const res = await apiFetch('/api/v1/rooms', { method: 'POST' })
       const data: RoomCreateResponse = await res.json()
       if (!res.ok) {
@@ -87,6 +137,32 @@ export function MainPage({ onJoinAsUser, onJoinAsAdmin }: Props) {
 
   function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key === 'Enter') handleJoin()
+  }
+
+  if (closedRoom) {
+    return (
+      <div className="page-wrap centered">
+        <div className="center-wrap">
+          <Logo />
+          <Card title="Комната закрыта">
+            <p className="modal-text" style={{ marginBottom: 16 }}>
+              Приём в комнате <b>{closedRoom.room}</b> сейчас закрыт. Дождитесь, пока
+              администратор откроет вход, и попробуйте снова.
+            </p>
+            <Button
+              variant="primary"
+              loading={joinLoading}
+              onClick={() => joinRoom(closedRoom.room, closedRoom.code)}
+            >
+              Попробовать снова
+            </Button>
+            <Button variant="secondary" onClick={() => setClosedRoom(null)}>
+              Назад
+            </Button>
+          </Card>
+        </div>
+      </div>
+    )
   }
 
   return (

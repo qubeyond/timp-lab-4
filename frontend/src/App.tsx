@@ -13,7 +13,6 @@ import {
   setAccessToken,
   clearAccessToken,
 } from '@/lib/auth'
-import type { TakeTicketResponse } from '@/types/api'
 
 type Page = 'main' | 'user' | 'admin'
 type AppState = 'loading' | 'ok' | 'unavailable' | '404' | 'error'
@@ -43,6 +42,12 @@ export default function App() {
   }
 
   async function restoreSession() {
+    // Если в URL есть параметры входа (?room=/?invite=/?code=), приоритет у них —
+    // их обрабатывает MainPage, а восстановление сессии не должно вмешиваться
+    // (иначе гонка: лишний queue/ticket и случайный талон для со-админа).
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('room') || params.get('invite')) return
+
     const savedRoom = localStorage.getItem(ROOM_KEY)
     const savedRole = localStorage.getItem(ROLE_KEY)
     if (!savedRoom || !savedRole) return
@@ -55,15 +60,16 @@ export default function App() {
     }
 
     if (savedRole === 'admin') {
+      // Восстанавливаем админ-сессию НЕ мутирующим запросом: /admin/resume
+      // переоформляет админ-токен и не создаёт талон (в отличие от queue/ticket).
       try {
-        const res = await apiFetch('/api/v1/queue/ticket', {
+        const res = await apiFetch('/api/v1/admin/resume', {
           method: 'POST',
           body: JSON.stringify({ room_id: savedRoom }),
         })
-        const data: TakeTicketResponse = await res.json()
-        if (res.ok && data.is_admin && data.access_token) {
+        const data = await res.json()
+        if (res.ok && data.access_token) {
           setAccessToken(data.access_token)
-          localStorage.setItem(ROLE_KEY, 'admin')
           setRoomId(savedRoom)
           setPage('admin')
           return

@@ -15,6 +15,7 @@ class RoomClosed:
 @dataclass
 class QueueAdded:
     queue_label: str
+    code: str = ""
 
 
 @dataclass

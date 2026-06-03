@@ -26,18 +26,30 @@ export interface RoomCloseResponse {
   status: string
 }
 
+export type TicketStatus = 'waiting' | 'on_way' | 'no_show'
+
+export interface WaitingTicket {
+  ticket: string
+  status: TicketStatus
+  position: number
+}
+
 export interface QueueInfo {
   label: string
+  code: string
   length: number
   status: 'serving' | 'waiting'
   current_ticket: string
+  current_status: TicketStatus | ''
   elapsed_time: number
+  waiting: WaitingTicket[]
 }
 
 export interface ClientContext {
   ticket_label: string
   queue_label: string
   position_label: string
+  ticket_status: TicketStatus | ''
   should_redirect: boolean
 }
 
@@ -49,6 +61,9 @@ export interface AdminContext {
 export interface RoomStateResponse {
   room_closed: boolean
   room_id: string
+  is_open: boolean
+  balancer_enabled: boolean
+  is_owner: boolean
   current_status: string | null
   elapsed_time: number | null
   avg_serve_seconds: number | null
@@ -69,6 +84,7 @@ export interface CompleteServingResponse {
 export interface QueueMutationResponse {
   status: string
   queue_label: string
+  code: string
 }
 
 export interface TicketTimeline {

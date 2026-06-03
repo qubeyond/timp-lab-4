@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { RoomHeader } from '@/components/RoomHeader'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { QrModal } from '@/components/QrModal'
+import { SettingsModal } from '@/components/SettingsModal'
 import { Button } from '@/components/ui/Button'
 import { Card, StatRow } from '@/components/ui/Card'
 import { apiFetch, getAccessToken, ensureToken } from '@/lib/auth'
@@ -21,6 +22,10 @@ export function AdminPage({ roomId, onClose, onRoomClosed, onToast }: Props) {
   const [stats, setStats] = useState<{ completed: number; avg: number } | null>(null)
   const [loading, setLoading] = useState(true)
   const [showQr, setShowQr] = useState(false)
+  const [isOpen, setIsOpen] = useState(true)
+  const [balancerEnabled, setBalancerEnabled] = useState(true)
+  const [isOwner, setIsOwner] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const { confirm, dialogProps } = useConfirm()
 
   const closedRef = useRef(false)
@@ -50,6 +55,9 @@ export function AdminPage({ roomId, onClose, onRoomClosed, onToast }: Props) {
       return
     }
     setLoading(false)
+    setIsOpen(data.is_open)
+    setBalancerEnabled(data.balancer_enabled)
+    setIsOwner(data.is_owner)
     const ctx = data.admin_context
     if (ctx) setQueues(ctx.queues)
     fetchStats()
@@ -128,6 +136,17 @@ export function AdminPage({ roomId, onClose, onRoomClosed, onToast }: Props) {
     onClose()
   }
 
+  async function handleLeaveRoom() {
+    if (!await confirm({
+      message: 'Выйти из комнаты? Вы потеряете права администратора. Комната продолжит работать.',
+      confirmLabel: 'Выйти',
+      danger: true,
+    })) return
+    closedRef.current = true // не переподключаться по WS после выхода
+    try { await apiFetch('/api/v1/admin/leave', { method: 'POST', body: JSON.stringify({ room_id: roomId }) }) } catch (_) {}
+    onClose()
+  }
+
   async function handleNext(queueLabel: string) {
     try {
       const res = await apiFetch('/api/v1/admin/next', {
@@ -145,6 +164,73 @@ export function AdminPage({ roomId, onClose, onRoomClosed, onToast }: Props) {
         body: JSON.stringify({ room_id: roomId, queue_label: queueLabel }),
       })
       if (!res.ok) onToast(((await res.json()) as { detail?: string }).detail || 'Ошибка', 'error')
+    } catch (e) { onToast((e as Error).message, 'error') }
+  }
+
+  async function handleSkip(queueLabel: string) {
+    try {
+      const res = await apiFetch('/api/v1/admin/skip', {
+        method: 'POST',
+        body: JSON.stringify({ room_id: roomId, queue_label: queueLabel }),
+      })
+      if (!res.ok) onToast(((await res.json()) as { detail?: string }).detail || 'Ошибка', 'error')
+    } catch (e) { onToast((e as Error).message, 'error') }
+  }
+
+  async function handleToggleEntry(next: boolean) {
+    setIsOpen(next) // оптимистично
+    try {
+      const res = await apiFetch('/api/v1/admin/entry', {
+        method: 'POST',
+        body: JSON.stringify({ room_id: roomId, is_open: next }),
+      })
+      if (!res.ok) { setIsOpen(!next); onToast('Не удалось изменить приём', 'error'); return }
+      onToast(next ? 'Приём открыт' : 'Приём закрыт', 'success')
+    } catch (e) { setIsOpen(!next); onToast((e as Error).message, 'error') }
+  }
+
+  async function handleToggleBalancer(next: boolean) {
+    setBalancerEnabled(next)
+    try {
+      const res = await apiFetch('/api/v1/admin/balancer', {
+        method: 'POST',
+        body: JSON.stringify({ room_id: roomId, enabled: next }),
+      })
+      if (!res.ok) { setBalancerEnabled(!next); onToast('Не удалось изменить балансировщик', 'error') }
+    } catch (e) { setBalancerEnabled(!next); onToast((e as Error).message, 'error') }
+  }
+
+  async function handleMoveTicket(ticket: string, toQueue: string, toIndex: number) {
+    try {
+      const res = await apiFetch('/api/v1/admin/move', {
+        method: 'POST',
+        body: JSON.stringify({
+          room_id: roomId, ticket, to_queue: toQueue, to_index: toIndex,
+        }),
+      })
+      if (!res.ok) onToast(((await res.json()) as { detail?: string }).detail || 'Ошибка', 'error')
+    } catch (e) { onToast((e as Error).message, 'error') }
+  }
+
+  function copyQueueLink(code: string) {
+    const link = `${location.origin}/?room=${roomId}&code=${code}`
+    navigator.clipboard.writeText(link).then(
+      () => onToast('Ссылка на очередь скопирована', 'success'),
+      () => onToast('Не удалось скопировать', 'error'),
+    )
+  }
+
+  async function handleInviteAdmin() {
+    try {
+      const res = await apiFetch('/api/v1/admin/invite', {
+        method: 'POST',
+        body: JSON.stringify({ room_id: roomId }),
+      })
+      const d = await res.json() as { detail?: string; token?: string }
+      if (!res.ok || !d.token) { onToast(d.detail || 'Не удалось создать приглашение', 'error'); return }
+      const link = `${location.origin}/?room=${roomId}&invite=${encodeURIComponent(d.token)}`
+      await navigator.clipboard.writeText(link)
+      onToast('Ссылка-приглашение скопирована (действует 1 час)', 'success')
     } catch (e) { onToast((e as Error).message, 'error') }
   }
 
@@ -189,15 +275,33 @@ export function AdminPage({ roomId, onClose, onRoomClosed, onToast }: Props) {
     <div className="page-wrap">
       {dialogProps && <ConfirmDialog {...dialogProps} />}
       {showQr && <QrModal url={qrUrl} roomId={roomId} onClose={() => setShowQr(false)} />}
+      {showSettings && (
+        <SettingsModal
+          isOpen={isOpen}
+          balancerEnabled={balancerEnabled}
+          isOwner={isOwner}
+          onToggleEntry={handleToggleEntry}
+          onToggleBalancer={handleToggleBalancer}
+          onInvite={handleInviteAdmin}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
       <RoomHeader
         roomId={roomId}
         label="Комната"
         onCopy={handleCopy}
         onQr={() => setShowQr(true)}
+        onSettings={() => setShowSettings(true)}
         action={
-          <Button variant="danger" size="sm" fullWidth={false} onClick={handleCloseRoom}>
-            Закрыть
-          </Button>
+          isOwner ? (
+            <Button variant="danger" size="sm" fullWidth={false} onClick={handleCloseRoom}>
+              Закрыть
+            </Button>
+          ) : (
+            <Button variant="danger" size="sm" fullWidth={false} onClick={handleLeaveRoom}>
+              Выйти
+            </Button>
+          )
         }
       />
 
@@ -211,9 +315,13 @@ export function AdminPage({ roomId, onClose, onRoomClosed, onToast }: Props) {
             <QueueCard
               key={q.label}
               queue={q}
+              showCode={!balancerEnabled}
               onNext={handleNext}
               onComplete={handleComplete}
+              onSkip={handleSkip}
               onRemove={handleRemoveQueue}
+              onCopyCode={copyQueueLink}
+              onMove={handleMoveTicket}
             />
           ))
         )}
@@ -231,20 +339,52 @@ export function AdminPage({ roomId, onClose, onRoomClosed, onToast }: Props) {
   )
 }
 
-interface QueueCardProps {
-  queue: QueueInfo
-  onNext: (label: string) => Promise<void>
-  onComplete: (label: string) => Promise<void>
-  onRemove: (label: string) => Promise<void>
+const STATUS_BADGE: Record<string, { text: string; cls: string }> = {
+  on_way: { text: 'в пути', cls: 'on_way' },
+  no_show: { text: 'не придёт', cls: 'no_show' },
 }
 
-function QueueCard({ queue: q, onNext, onComplete, onRemove }: QueueCardProps) {
+interface QueueCardProps {
+  queue: QueueInfo
+  showCode: boolean
+  onNext: (label: string) => Promise<void>
+  onComplete: (label: string) => Promise<void>
+  onSkip: (label: string) => Promise<void>
+  onRemove: (label: string) => Promise<void>
+  onCopyCode: (code: string) => void
+  onMove: (ticket: string, toQueue: string, toIndex: number) => Promise<void>
+}
+
+function QueueCard({
+  queue: q, showCode, onNext, onComplete, onSkip, onRemove, onCopyCode, onMove,
+}: QueueCardProps) {
   const [actionLoading, setActionLoading] = useState(false)
+  const [dragOver, setDragOver] = useState<number | 'end' | null>(null)
+  const [expanded, setExpanded] = useState(false)
   const elapsed = useTimer(q.elapsed_time ?? 0, q.status === 'serving')
+
+  const COLLAPSE_AFTER = 5
+  const collapsed = !expanded && q.waiting.length > COLLAPSE_AFTER
+  const visibleWaiting = collapsed ? q.waiting.slice(0, COLLAPSE_AFTER) : q.waiting
+  const hiddenCount = q.waiting.length - visibleWaiting.length
 
   async function handleAction(fn: () => Promise<void>) {
     setActionLoading(true)
     try { await fn() } finally { setActionLoading(false) }
+  }
+
+  // Drag-n-drop: переносим талон (DataTransfer хранит "label:ticket").
+  function onDragStart(e: React.DragEvent, ticket: string) {
+    e.dataTransfer.setData('text/plain', `${q.label}:${ticket}`)
+    e.dataTransfer.effectAllowed = 'move'
+  }
+
+  function onDropAt(e: React.DragEvent, index: number) {
+    e.preventDefault()
+    setDragOver(null)
+    const payload = e.dataTransfer.getData('text/plain')
+    const [, ticket] = payload.split(':')
+    if (ticket) onMove(ticket, q.label, index)
   }
 
   return (
@@ -268,7 +408,22 @@ function QueueCard({ queue: q, onNext, onComplete, onRemove }: QueueCardProps) {
         </Button>
       </div>
 
+      {showCode && q.code && (
+        <div className="queue-code-row" onClick={() => onCopyCode(q.code)} title="Скопировать ссылку на очередь">
+          <span className="queue-code-label">Код входа</span>
+          <span className="queue-code-val">{q.code}</span>
+        </div>
+      )}
+
       <div className="adm-ticket-big">{q.current_ticket}</div>
+
+      {q.status === 'serving' && STATUS_BADGE[q.current_status] && (
+        <div className="serving-status">
+          <span className={`status-badge ${STATUS_BADGE[q.current_status].cls}`}>
+            {q.current_status === 'on_way' ? 'идёт' : STATUS_BADGE[q.current_status].text}
+          </span>
+        </div>
+      )}
 
       {q.status === 'serving' && (
         <div className={`timer-display${elapsed > 0 ? ' active' : ''}`}>
@@ -278,13 +433,25 @@ function QueueCard({ queue: q, onNext, onComplete, onRemove }: QueueCardProps) {
 
       <div className="queue-card-action">
         {q.status === 'serving' ? (
-          <Button
-            variant="danger-solid"
-            loading={actionLoading}
-            onClick={() => handleAction(() => onComplete(q.label))}
-          >
-            {!actionLoading && `Завершить · ${q.label}`}
-          </Button>
+          <div className="btn-row">
+            <Button
+              variant="secondary"
+              fullWidth={false}
+              className="skip-btn"
+              disabled={actionLoading}
+              title="Пропустить без учёта в статистике"
+              onClick={() => handleAction(() => onSkip(q.label))}
+            >
+              Пропустить
+            </Button>
+            <Button
+              variant="danger-solid"
+              loading={actionLoading}
+              onClick={() => handleAction(() => onComplete(q.label))}
+            >
+              {!actionLoading && `Завершить · ${q.label}`}
+            </Button>
+          </div>
         ) : (
           <Button
             variant="success-solid"
@@ -296,13 +463,44 @@ function QueueCard({ queue: q, onNext, onComplete, onRemove }: QueueCardProps) {
         )}
       </div>
 
-      <div className="queue-line">
-        {q.length === 0 ? (
-          <span className="queue-empty">Очередь пуста</span>
+      {/* Зона ожидающих — всегда drop-таргет, чтобы можно было перетащить
+          талон даже в пустую очередь. */}
+      <ul
+        className={`waiting-list${dragOver === 'end' ? ' drag-over-end' : ''}`}
+        onDragOver={e => { e.preventDefault(); setDragOver('end') }}
+        onDragLeave={() => setDragOver(null)}
+        onDrop={e => onDropAt(e, q.waiting.length)}
+      >
+        {q.waiting.length === 0 ? (
+          <li className="waiting-empty">Перетащите талон сюда или пусто</li>
         ) : (
-          <span className="q-chip">{q.length} чел. ожидают</span>
+          visibleWaiting.map((t, i) => {
+            const badge = STATUS_BADGE[t.status]
+            return (
+              <li
+                key={t.ticket}
+                className={`waiting-item${dragOver === i ? ' drag-over' : ''}`}
+                draggable
+                onDragStart={e => onDragStart(e, t.ticket)}
+                onDragOver={e => { e.preventDefault(); e.stopPropagation(); setDragOver(i) }}
+                onDragLeave={e => e.stopPropagation()}
+                onDrop={e => { e.stopPropagation(); onDropAt(e, i) }}
+              >
+                <span className="waiting-pos">{i + 1}</span>
+                <span className="waiting-ticket">{t.ticket}</span>
+                {badge && <span className={`status-badge ${badge.cls}`}>{badge.text}</span>}
+                <span className="drag-handle" aria-hidden>⠿</span>
+              </li>
+            )
+          })
         )}
-      </div>
+      </ul>
+
+      {(collapsed || expanded) && q.waiting.length > COLLAPSE_AFTER && (
+        <button type="button" className="link-btn" onClick={() => setExpanded(v => !v)}>
+          {collapsed ? `Показать ещё ${hiddenCount}` : 'Свернуть'}
+        </button>
+      )}
     </Card>
   )
 }

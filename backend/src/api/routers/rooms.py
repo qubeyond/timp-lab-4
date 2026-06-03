@@ -6,7 +6,12 @@ from fastapi import APIRouter, Depends, Request
 
 from src.api.deps import get_current_user, require_admin
 from src.api.limiter import limiter
-from src.api.schemas.rooms import RoomCloseResponse, RoomCreateResponse, RoomStateResponse
+from src.api.schemas.rooms import (
+    RoomCloseResponse,
+    RoomCreateRequest,
+    RoomCreateResponse,
+    RoomStateResponse,
+)
 from src.services.room import RoomService
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
@@ -19,8 +24,12 @@ async def create_room(
     request: Request,
     user: Annotated[dict, Depends(get_current_user)],
     room_service: FromDishka[RoomService],
+    payload: RoomCreateRequest | None = None,
 ):
-    result = await room_service.create_room(user["sub"])
+    cfg = payload or RoomCreateRequest()
+    result = await room_service.create_room(
+        user["sub"], is_open=cfg.is_open, balancer_enabled=cfg.balancer_enabled
+    )
 
     return RoomCreateResponse(room_id=result.room_id, access_token=result.access_token)
 
