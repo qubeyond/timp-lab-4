@@ -15,3 +15,4 @@ COPY package.json ./
 RUN npm install --no-audit --no-fund
 COPY . .
 RUN npm run build
+RUN cp -r /app/dist /dist-build

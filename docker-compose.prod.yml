@@ -1,18 +1,46 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: queue_postgres
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: queue_redis
+    restart: always
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
   backend:
-    ports: []
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: queue_backend
+    restart: always
+    env_file:
+      - .env
+      - ./backend/.env
+    depends_on:
+      - redis
+      - postgres
 
   frontend:
     build:
+      context: ./frontend
+      dockerfile: Dockerfile
       target: builder
-    # В проде фронт — одноразовая build-задача: собрал dist в volume и вышел.
-    # restart:always из базового compose рестартил бы её вечно (и Caddy
-    # бесконечно ждал бы service_completed_successfully) — поэтому "no".
+    container_name: queue_frontend
     restart: "no"
-    ports: []
     volumes:
       - frontend_dist:/app/dist
-    command: ["sh", "-c", "echo done"]
+    command: ["sh", "-c", "rm -rf /app/dist/* && cp -r /dist-build/. /app/dist/ && echo done"]
+    depends_on:
+      - backend
 
   caddy:
     image: caddy:2-alpine
@@ -35,6 +63,8 @@ services:
         condition: service_started
 
 volumes:
+  postgres_data:
+  redis_data:
   caddy_data:
   caddy_config:
   frontend_dist:
