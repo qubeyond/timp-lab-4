@@ -89,7 +89,7 @@ async def test_toggle_entry_open(client, admin_headers, mock_queue_repo):
 
 async def test_toggle_entry_requires_admin(client, admin_headers, mock_queue_repo):
     # Не владелец и не со-админ — доступ запрещён.
-    mock_queue_repo.is_admin.return_value = False
+    mock_queue_repo.get_admin_role.return_value = None
     resp = await client.post(
         "/api/v1/admin/entry", json={"room_id": "ROOM01", "is_open": True}, headers=admin_headers
     )
@@ -323,9 +323,11 @@ async def test_state_exposes_flags_and_codes(client, user_headers, mock_queue_re
 
 
 async def test_state_exposes_waiting_detail_with_status(client, user_headers, mock_queue_repo):
-    from src.domain.entities import TICKET_ON_WAY
+    from src.domain.enums import TicketStatus
 
-    t1 = Ticket(num="A1", user_id="u1", queue_label="A", room_id="ROOM01", status=TICKET_ON_WAY)
+    t1 = Ticket(
+        num="A1", user_id="u1", queue_label="A", room_id="ROOM01", status=TicketStatus.ON_WAY
+    )
     mock_queue_repo.room_exists.return_value = True
     mock_queue_repo.get_avg_serve.return_value = None
     mock_queue_repo.load_all.return_value = [Queue(label="A", room_id="ROOM01", waiting=[t1])]
@@ -342,17 +344,37 @@ async def test_state_exposes_waiting_detail_with_status(client, user_headers, mo
 # ---------------------------------------------------------------------------
 
 
-async def test_owner_creates_invite(client, admin_headers, mock_queue_repo):
+async def test_owner_creates_invite_with_role(client, admin_headers, mock_queue_repo):
+    resp = await client.post(
+        "/api/v1/admin/invite",
+        json={"room_id": "ROOM01", "role": "queues"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["token"]
+    assert data["role"] == "queues"
+    mock_queue_repo.create_invite.assert_awaited_once()
+
+
+async def test_invite_default_role_full(client, admin_headers):
     resp = await client.post(
         "/api/v1/admin/invite", json={"room_id": "ROOM01"}, headers=admin_headers
     )
     assert resp.status_code == 200
-    assert resp.json()["token"]
-    mock_queue_repo.create_invite.assert_awaited_once()
+    assert resp.json()["role"] == "full"
+
+
+async def test_invite_rejects_bad_role(client, admin_headers):
+    resp = await client.post(
+        "/api/v1/admin/invite",
+        json={"room_id": "ROOM01", "role": "godmode"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 422  # pattern
 
 
 async def test_non_owner_cannot_create_invite(client, admin_headers, mock_queue_repo):
-    mock_queue_repo.is_admin.return_value = False  # не владелец
     mock_queue_repo.get_owner.return_value = "someone_else"
     resp = await client.post(
         "/api/v1/admin/invite", json={"room_id": "ROOM01"}, headers=admin_headers
@@ -360,12 +382,33 @@ async def test_non_owner_cannot_create_invite(client, admin_headers, mock_queue_
     assert resp.status_code == 403
 
 
+async def test_owner_lists_co_admins(client, admin_headers, mock_queue_repo):
+    mock_queue_repo.list_admins.return_value = {"helper1": "queues", "helper2": "full"}
+    mock_queue_repo.count_active_invites.return_value = 2
+    resp = await client.get("/api/v1/admin/admins/ROOM01", headers=admin_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["active_invites"] == 2
+    roles = {a["user_id"]: a["role"] for a in data["admins"]}
+    assert roles == {"helper1": "queues", "helper2": "full"}
+
+
+async def test_owner_revokes_co_admin(client, admin_headers, mock_queue_repo):
+    resp = await client.post(
+        "/api/v1/admin/revoke-admin",
+        json={"room_id": "ROOM01", "user_id": "helper1"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200
+    mock_queue_repo.remove_admin.assert_awaited_once_with("ROOM01", "helper1")
+
+
 async def test_accept_invite_grants_admin_token(client, user_headers, mock_queue_repo):
     from tests.conftest import decode_token
 
     mock_queue_repo.room_exists.return_value = True
     mock_queue_repo.is_admin.return_value = False  # ещё не админ
-    mock_queue_repo.consume_invite.return_value = True
+    mock_queue_repo.consume_invite.return_value = "full"  # валидное приглашение с ролью
 
     resp = await client.post(
         "/api/v1/admin/accept-invite",
@@ -378,13 +421,13 @@ async def test_accept_invite_grants_admin_token(client, user_headers, mock_queue
     payload = decode_token(data["access_token"])
     assert payload["role"] == "admin"
     assert payload["room_id"] == "ROOM01"
-    mock_queue_repo.add_admin.assert_awaited_once_with("ROOM01", "test_user")
+    mock_queue_repo.add_admin.assert_awaited_once_with("ROOM01", "test_user", "full")
 
 
 async def test_accept_invalid_invite_rejected(client, user_headers, mock_queue_repo):
     mock_queue_repo.room_exists.return_value = True
     mock_queue_repo.is_admin.return_value = False  # не админ → нужен валидный токен
-    mock_queue_repo.consume_invite.return_value = False
+    mock_queue_repo.consume_invite.return_value = None  # приглашение невалидно
 
     resp = await client.post(
         "/api/v1/admin/accept-invite",
@@ -462,6 +505,31 @@ async def test_revoked_token_rejected_on_protected_endpoint(client, user_headers
     resp = await client.post(
         "/api/v1/queue/ticket", json={"room_id": "ROOM01"}, headers=user_headers
     )
+    assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Сообщение о баге (feedback)
+# ---------------------------------------------------------------------------
+
+
+async def test_feedback_accepts_message(client, user_headers):
+    resp = await client.post(
+        "/api/v1/feedback",
+        json={"message": "Кнопка не работает", "room_id": "ROOM01"},
+        headers=user_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "sent"
+
+
+async def test_feedback_rejects_empty(client, user_headers):
+    resp = await client.post("/api/v1/feedback", json={"message": "x"}, headers=user_headers)
+    assert resp.status_code == 422  # min_length=3
+
+
+async def test_feedback_requires_auth(client):
+    resp = await client.post("/api/v1/feedback", json={"message": "hello there"})
     assert resp.status_code == 401
 
 

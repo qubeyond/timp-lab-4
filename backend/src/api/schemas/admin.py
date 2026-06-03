@@ -63,10 +63,31 @@ class RoomFlagResponse(BaseModel):
 
 class InviteRequest(BaseModel):
     room_id: RoomId
+    role: str = Field(default="full", pattern=r"^(full|queues)$")
 
 
 class InviteResponse(BaseModel):
     token: str
+    role: str
+
+
+class CoAdminItem(BaseModel):
+    user_id: str
+    role: str
+
+
+class CoAdminsResponse(BaseModel):
+    admins: list[CoAdminItem]
+    active_invites: int = Field(ge=0)
+
+
+class RevokeAdminRequest(BaseModel):
+    room_id: RoomId
+    user_id: str = Field(min_length=1, max_length=64)
+
+
+class RevokeAdminResponse(BaseModel):
+    status: str = Field(default="revoked")
 
 
 class AcceptInviteRequest(BaseModel):

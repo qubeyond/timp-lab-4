@@ -11,6 +11,8 @@ from src.api.schemas.admin import (
     AddQueueRequest,
     BalancerToggleRequest,
     CallNextResponse,
+    CoAdminItem,
+    CoAdminsResponse,
     CompleteServingResponse,
     EntryToggleRequest,
     InviteRequest,
@@ -23,6 +25,8 @@ from src.api.schemas.admin import (
     RemoveQueueRequest,
     ResumeAdminRequest,
     ResumeAdminResponse,
+    RevokeAdminRequest,
+    RevokeAdminResponse,
     RoomFlagResponse,
     RoomStatsResponse,
     SkipResponse,
@@ -139,9 +143,42 @@ async def create_invite(
 ):
     _check_room(payload.room_id.upper(), user)
 
-    result = await room_service.create_invite(payload.room_id.upper(), user["sub"])
+    result = await room_service.create_invite(payload.room_id.upper(), user["sub"], payload.role)
 
-    return InviteResponse(token=result["token"])
+    return InviteResponse(token=result["token"], role=result["role"])
+
+
+@router.get("/admins/{room_id}", response_model=CoAdminsResponse)
+@inject
+async def list_co_admins(
+    room_id: str,
+    user: Annotated[dict, Depends(require_admin)],
+    room_service: FromDishka[RoomService],
+):
+    _check_room(room_id.upper(), user)
+
+    result = await room_service.list_co_admins(room_id.upper(), user["sub"])
+
+    return CoAdminsResponse(
+        admins=[CoAdminItem(user_id=a["user_id"], role=a["role"]) for a in result["admins"]],
+        active_invites=result["active_invites"],
+    )
+
+
+@router.post("/revoke-admin", response_model=RevokeAdminResponse)
+@inject
+async def revoke_co_admin(
+    payload: RevokeAdminRequest,
+    user: Annotated[dict, Depends(require_admin)],
+    room_service: FromDishka[RoomService],
+):
+    _check_room(payload.room_id.upper(), user)
+
+    result = await room_service.revoke_co_admin(
+        payload.room_id.upper(), user["sub"], payload.user_id
+    )
+
+    return RevokeAdminResponse(status=result["status"])
 
 
 @router.post("/accept-invite", response_model=AcceptInviteResponse)
@@ -151,8 +188,6 @@ async def accept_invite(
     user: Annotated[dict, Depends(get_current_user)],
     room_service: FromDishka[RoomService],
 ):
-    # Любой авторизованный пользователь может принять приглашение —
-    # роль admin он получит только после успешного приёма валидного токена.
     result = await room_service.accept_invite(payload.room_id.upper(), payload.token, user["sub"])
 
     return AcceptInviteResponse(room_id=result["room_id"], access_token=result["access_token"])
@@ -179,7 +214,6 @@ async def resume_admin(
     user: Annotated[dict, Depends(get_current_user)],
     room_service: FromDishka[RoomService],
 ):
-    # Любой авторизованный — сервис проверит, что он действительно админ комнаты.
     result = await room_service.resume_admin(payload.room_id.upper(), user["sub"])
 
     return ResumeAdminResponse(

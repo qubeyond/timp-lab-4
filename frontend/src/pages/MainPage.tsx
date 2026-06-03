@@ -15,19 +15,17 @@ export function MainPage({ onJoinAsUser, onJoinAsAdmin }: Props) {
   const [joinLoading, setJoinLoading] = useState(false)
   const [createLoading, setCreateLoading] = useState(false)
   const [inlineError, setInlineError] = useState('')
-  // Экран ожидания закрытой комнаты — храним и код очереди, чтобы retry не терял VIP-вход.
+
   const [closedRoom, setClosedRoom] = useState<{ room: string; code?: string } | null>(null)
 
-  // Гард от повторного запуска: StrictMode в dev вызывает эффект дважды, а
-  // ссылка-приглашение одноразовая — второй вызов «съел» бы её и упал.
   const autoJoinDone = useRef(false)
 
   useEffect(() => {
     if (autoJoinDone.current) return
     const params = new URLSearchParams(window.location.search)
     const roomFromQr = params.get('room')
-    const codeFromQr = params.get('code') // прямой вход в конкретную очередь (VIP)
-    const inviteFromQr = params.get('invite') // приглашение со-администратора
+    const codeFromQr = params.get('code')
+    const inviteFromQr = params.get('invite')
     if (!roomFromQr) return
     autoJoinDone.current = true
     window.history.replaceState({}, '', '/')
@@ -79,17 +77,17 @@ export function MainPage({ onJoinAsUser, onJoinAsAdmin }: Props) {
       const data: TakeTicketResponse = await res.json()
       if (!res.ok) {
         const detail = (data as { detail?: string }).detail || ''
-        // Приём закрыт — держим экран ожидания, сохраняя код очереди для retry.
+
         if (res.status === 403 && detail.toLowerCase().includes('закрыт')) {
           setClosedRoom({ room: rId, code })
           return
         }
-        // Любая другая ошибка — уходим на главную с сообщением.
+
         setClosedRoom(null)
         setInlineError(detail || 'Комната не найдена')
         return
       }
-      // Успех: комната открыта, талон получен — покидаем экран ожидания.
+
       setClosedRoom(null)
       if (data.is_admin && data.access_token) {
         setAccessToken(data.access_token)
@@ -118,8 +116,7 @@ export function MainPage({ onJoinAsUser, onJoinAsAdmin }: Props) {
     clearError()
     try {
       await ensureToken()
-      // Комната создаётся открытой со включённым балансировщиком;
-      // тонкая настройка — в панели администратора.
+
       const res = await apiFetch('/api/v1/rooms', { method: 'POST' })
       const data: RoomCreateResponse = await res.json()
       if (!res.ok) {

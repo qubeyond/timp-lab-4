@@ -265,7 +265,7 @@ async def test_call_next_rejects_stale_token_for_reused_room(
 ):
     """Регрессия: админ-токен валиден и room_id совпадает, но в Redis ни владелец,
     ни со-админы не совпадают (комната пересоздана) — мутация отклонена 403."""
-    mock_queue_repo.is_admin.return_value = False
+    mock_queue_repo.get_admin_role.return_value = None  # ни владелец, ни со-админ
     mock_queue_repo.load.return_value = Queue(
         label="A",
         room_id="ROOM01",
@@ -281,7 +281,7 @@ async def test_call_next_rejects_stale_token_for_reused_room(
 
 async def test_add_queue_rejects_when_not_admin(client, admin_headers, mock_queue_repo):
     """Комната истекла по TTL / не админ — добавление очереди запрещено."""
-    mock_queue_repo.is_admin.return_value = False
+    mock_queue_repo.get_admin_role.return_value = None
     resp = await client.post(
         "/api/v1/admin/queue/add",
         json={"room_id": "ROOM01"},

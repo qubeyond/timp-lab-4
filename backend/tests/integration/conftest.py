@@ -109,7 +109,7 @@ def auth_service() -> AuthService:
 
 @pytest.fixture
 def room_service(queue_repo, room_repo, ticket_repo, auth_service, publisher) -> RoomService:
-    return RoomService(queue_repo, room_repo, ticket_repo, auth_service, publisher)
+    return RoomService(queue_repo, room_repo, ticket_repo, auth_service, publisher, Settings())
 
 
 @pytest.fixture

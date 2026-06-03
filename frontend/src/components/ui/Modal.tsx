@@ -2,13 +2,13 @@ import { useEffect, type ReactNode } from 'react'
 
 interface Props {
   onClose: () => void
-  /** Ширина бокса. sm — диалоги, qr — компактный по центру с gap. */
+
   size?: 'sm' | 'md' | 'qr'
-  /** Заголовок (uppercase card-title). */
+
   title?: string
-  /** Показать крестик закрытия в правом верхнем углу. */
+
   showClose?: boolean
-  /** Закрывать по клику на оверлей (по умолчанию да). */
+
   closeOnOverlay?: boolean
   children: ReactNode
 }
@@ -53,7 +53,6 @@ export function Modal({
   )
 }
 
-/** Ряд кнопок действия снизу модалки — равной ширины. */
 export function ModalActions({ children }: { children: ReactNode }) {
   return <div className="modal-actions">{children}</div>
 }

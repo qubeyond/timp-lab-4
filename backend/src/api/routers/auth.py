@@ -8,6 +8,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.api.limiter import limiter
 from src.api.schemas.auth import TokenResponse
+from src.config import settings
+from src.domain.enums import TokenType, UserRole
 from src.domain.repositories import QueueRepository
 from src.services.auth import REFRESH_COOKIE, AuthService, generate_identity
 
@@ -17,7 +19,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/token", response_model=TokenResponse)
-@limiter.limit("20/minute")
+@limiter.limit(settings.rate_limit_auth)
 @inject
 async def get_token(
     request: Request,
@@ -25,27 +27,25 @@ async def get_token(
     auth_service: FromDishka[AuthService],
     refresh_token: Annotated[str | None, Cookie(alias=REFRESH_COOKIE)] = None,
 ):
-    # Личность выпускает СЕРВЕР. Если у клиента уже есть валидная refresh-кука —
-    # переиспользуем её sub (та же личность), иначе генерируем новую.
     fingerprint: str | None = None
     if refresh_token:
         try:
             payload = auth_service.decode_token(refresh_token)
-            if payload.get("type") == "refresh":
+            if payload.get("type") == TokenType.REFRESH:
                 fingerprint = payload.get("sub")
         except HTTPException:
             fingerprint = None
     if not fingerprint:
         fingerprint = generate_identity()
 
-    access_token = auth_service.create_token(fingerprint=fingerprint, role="user")
+    access_token = auth_service.create_token(fingerprint=fingerprint, role=UserRole.USER)
     auth_service.set_refresh_cookie(response, fingerprint)
 
     return TokenResponse(access_token=access_token)
 
 
 @router.post("/refresh", response_model=TokenResponse)
-@limiter.limit("30/minute")
+@limiter.limit(settings.rate_limit_auth)
 @inject
 async def refresh_token(
     request: Request,
@@ -58,11 +58,11 @@ async def refresh_token(
 
     payload = auth_service.decode_token(refresh_token)
 
-    if payload.get("type") != "refresh":
+    if payload.get("type") != TokenType.REFRESH:
         raise HTTPException(status_code=401, detail="Невалидный тип токена")
 
     fingerprint: str = payload["sub"]
-    access_token = auth_service.create_token(fingerprint=fingerprint, role="user")
+    access_token = auth_service.create_token(fingerprint=fingerprint, role=UserRole.USER)
 
     auth_service.set_refresh_cookie(response, fingerprint)
 
@@ -80,8 +80,6 @@ async def logout(
 ):
     response.delete_cookie(key=REFRESH_COOKIE, path="/api/v1/auth")
 
-    # Отзываем access-токен по jti до его естественного истечения,
-    # чтобы он не работал после выхода (JWT сам по себе не отзывается).
     if credentials:
         try:
             payload = auth_service.decode_token(credentials.credentials)
@@ -92,6 +90,6 @@ async def logout(
                 if ttl > 0:
                     await queue_repo.revoke_token(jti, ttl)
         except HTTPException:
-            pass  # битый/истёкший токен отзывать не нужно
+            pass
 
     return {"status": "ok"}

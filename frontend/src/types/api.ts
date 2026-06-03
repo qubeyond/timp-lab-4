@@ -87,6 +87,23 @@ export interface QueueMutationResponse {
   code: string
 }
 
+export type AdminRole = 'full' | 'queues'
+
+export interface InviteResponse {
+  token: string
+  role: AdminRole
+}
+
+export interface CoAdminItem {
+  user_id: string
+  role: AdminRole
+}
+
+export interface CoAdminsResponse {
+  admins: CoAdminItem[]
+  active_invites: number
+}
+
 export interface TicketTimeline {
   ticket: string
   queue_label: string
@@ -105,4 +122,4 @@ export interface RoomStatsResponse {
 
 export type WsMessage =
   | { type: 'welcome'; data: RoomStateResponse }
-  | { type: 'update'; data: { room_closed?: boolean } }
+  | { type: 'update'; data?: { room_closed?: boolean; admin_revoked?: string } }

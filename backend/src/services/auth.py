@@ -6,29 +6,29 @@ from fastapi import HTTPException, Response
 from fastapi.security import HTTPAuthorizationCredentials
 
 from src.config import Settings
+from src.domain.constants import IDENTITY_TOKEN_BYTES, JTI_BYTES
+from src.domain.enums import TokenType, UserRole
 
 REFRESH_COOKIE = "refresh_token"
 
 
 def generate_identity() -> str:
-    # Серверный неугадываемый идентификатор посетителя. Раньше его задавал
-    # клиент (?fingerprint=...), что позволяло выдать себя за другого —
-    # теперь личность выпускает только сервер.
-    return "u_" + secrets.token_urlsafe(16)
+    return "u_" + secrets.token_urlsafe(IDENTITY_TOKEN_BYTES)
 
 
 class AuthService:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
-    def create_token(self, fingerprint: str, role: str = "user", room_id: str | None = None) -> str:
+    def create_token(
+        self, fingerprint: str, role: str = UserRole.USER, room_id: str | None = None
+    ) -> str:
         payload = {
             "sub": fingerprint,
             "role": role,
             "room_id": room_id,
-            "type": "access",
-            # jti — уникальный id токена, нужен для отзыва при logout.
-            "jti": secrets.token_urlsafe(8),
+            "type": TokenType.ACCESS,
+            "jti": secrets.token_urlsafe(JTI_BYTES),
             "exp": datetime.now(UTC) + timedelta(minutes=self._settings.jwt_expire_minutes),
         }
 
@@ -39,7 +39,7 @@ class AuthService:
     def create_refresh_token(self, fingerprint: str) -> str:
         payload = {
             "sub": fingerprint,
-            "type": "refresh",
+            "type": TokenType.REFRESH,
             "exp": datetime.now(UTC) + timedelta(days=self._settings.refresh_token_expire_days),
         }
 
@@ -76,13 +76,13 @@ class AuthService:
 
         payload = self.decode_token(credentials.credentials)
 
-        if payload.get("type") != "access":
+        if payload.get("type") != TokenType.ACCESS:
             raise HTTPException(status_code=401, detail="Невалидный тип токена")
 
         return payload
 
     def verify_admin(self, user: dict) -> dict:
-        if user.get("role") != "admin":
+        if user.get("role") != UserRole.ADMIN:
             raise HTTPException(status_code=403, detail="Требуются права администратора")
 
         return user

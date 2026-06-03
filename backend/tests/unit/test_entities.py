@@ -2,10 +2,8 @@ from datetime import UTC, datetime
 
 import pytest
 
+from src.domain.constants import DEFAULT_QUEUE, MAX_QUEUES, QUEUE_LABELS
 from src.domain.entities import (
-    DEFAULT_QUEUE,
-    MAX_QUEUES,
-    QUEUE_LABELS,
     Queue,
     Room,
     Ticket,

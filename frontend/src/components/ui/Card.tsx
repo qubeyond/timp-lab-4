@@ -3,7 +3,7 @@ import type { ReactNode, CSSProperties } from 'react'
 interface Props {
   title?: string
   children: ReactNode
-  /** Доп. класс для редких тонких настроек. */
+
   className?: string
   style?: CSSProperties
 }
@@ -17,14 +17,13 @@ export function Card({ title, children, className = '', style }: Props) {
   )
 }
 
-/** Строка «label — value» внутри карточки (статистика и пр.). */
 export function StatRow({
   label,
   accent,
   children,
 }: {
   label: string
-  /** Цветовой акцент значения. */
+
   accent?: 'blue' | 'green' | 'accent'
   children: ReactNode
 }) {

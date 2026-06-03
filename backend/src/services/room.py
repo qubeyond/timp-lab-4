@@ -3,7 +3,17 @@ from datetime import UTC, datetime
 
 from fastapi import HTTPException
 
-from src.domain.entities import DEFAULT_QUEUE, Queue, Room, Ticket
+from src.config import Settings
+from src.domain.constants import DEFAULT_QUEUE
+from src.domain.entities import Queue, Room, Ticket
+from src.domain.enums import (
+    ROLE_PERMISSIONS,
+    AdminRole,
+    Permission,
+    QueueState,
+    UserRole,
+    WsMessageType,
+)
 from src.domain.repositories import (
     EventPublisher,
     QueueRepository,
@@ -29,12 +39,14 @@ class RoomService:
         ticket_repo: TicketRepository,
         auth_service: AuthService,
         publisher: EventPublisher,
+        settings: Settings,
     ) -> None:
         self._qr = queue_repo
         self._rr = room_repo
         self._tr = ticket_repo
         self._auth = auth_service
         self._pub = publisher
+        self._settings = settings
 
     async def create_room(
         self, owner_id: str, *, is_open: bool = True, balancer_enabled: bool = True
@@ -55,11 +67,15 @@ class RoomService:
                     room_id, is_open=is_open, balancer_enabled=balancer_enabled
                 )
                 await self._qr.save(
-                    Queue(label=DEFAULT_QUEUE, room_id=room_id, code=generate_queue_code())
+                    Queue(
+                        label=DEFAULT_QUEUE,
+                        room_id=room_id,
+                        code=generate_queue_code(self._settings.queue_code_length),
+                    )
                 )
                 await self._rr.save(room)
 
-                token = self._auth.create_token(owner_id, role="admin", room_id=room_id)
+                token = self._auth.create_token(owner_id, role=UserRole.ADMIN, room_id=room_id)
                 logger.info("Room %s created by %s", room_id, owner_id)
 
                 return RoomCreated(room_id=room_id, access_token=token)
@@ -67,19 +83,16 @@ class RoomService:
         raise HTTPException(status_code=500, detail="Ошибка генерации ID комнаты")
 
     async def set_entry_open(self, room_id: str, user_id: str, is_open: bool) -> dict:
-        await self._assert_admin(room_id, user_id)
+        await self._assert_permission(room_id, user_id, Permission.SETTINGS)
         await self._qr.set_room_flags(room_id, is_open=is_open)
-        await self._pub.publish(room_id, {"type": "update"})
+        await self._pub.publish(room_id, {"type": WsMessageType.UPDATE})
         logger.info("Room %s entry %s by %s", room_id, "opened" if is_open else "closed", user_id)
         return {"is_open": is_open}
 
     async def set_balancer(self, room_id: str, user_id: str, enabled: bool) -> dict:
-        await self._assert_admin(room_id, user_id)
+        await self._assert_permission(room_id, user_id, Permission.SETTINGS)
         await self._qr.set_room_flags(room_id, balancer_enabled=enabled)
 
-        # При ВКЛЮЧЕНИИ балансировщика выравниваем уже стоящих: раскидываем всех
-        # ожидающих по очередям равномерно (round-robin), сохраняя их порядок.
-        # Вызванные (serving) не трогаем.
         if enabled:
             async with self._qr.lock(room_id):
                 queues = await self._qr.load_all(room_id)
@@ -88,13 +101,12 @@ class RoomService:
                     for q in queues:
                         await self._qr.save(q)
 
-        await self._pub.publish(room_id, {"type": "update"})
+        await self._pub.publish(room_id, {"type": WsMessageType.UPDATE})
         logger.info("Room %s balancer %s by %s", room_id, enabled, user_id)
         return {"balancer_enabled": enabled}
 
     @staticmethod
     def _rebalance(queues: list[Queue]) -> None:
-        """Равномерно перераспределить всех ожидающих по очередям (round-robin)."""
         pool: list[Ticket] = []
         for q in queues:
             pool.extend(q.waiting)
@@ -108,68 +120,80 @@ class RoomService:
 
     @staticmethod
     def _room_from(room_id: str, queues: list[Queue]) -> Room:
-        # Источник истины правил — доменная сущность Room. Живое состояние
-        # очередей лежит в Redis, поэтому собираем Room из актуальных меток
-        # и делегируем ей решения (можно ли добавить/удалить, какая метка следующая).
         return Room(room_id=room_id, owner_id="", queue_labels=[q.label for q in queues])
 
     async def _assert_owner(self, room_id: str, user_id: str) -> None:
-        # Двойная проверка владельца: роль admin уже проверена в токене, но
-        # токен живёт дольше, чем комната в Redis (TTL), и 6-символьный ID
-        # может быть переиспользован новой комнатой. Сверяемся с владельцем
-        # в Redis, чтобы старый токен не управлял чужой комнатой.
         owner = await self._qr.get_owner(room_id)
 
         if owner is None or owner != user_id:
             raise HTTPException(status_code=403, detail="Доступ запрещён")
 
-    async def _assert_admin(self, room_id: str, user_id: str) -> None:
-        # Управлять очередями может владелец ИЛИ назначенный со-администратор.
-        # Закрытие комнаты и раздача прав остаются только за владельцем.
-        if not await self._qr.is_admin(room_id, user_id):
+    async def _assert_permission(self, room_id: str, user_id: str, perm: str) -> None:
+        role = await self._qr.get_admin_role(room_id, user_id)
+        if role is None:
             raise HTTPException(status_code=403, detail="Доступ запрещён")
+        if role == UserRole.OWNER:
+            return
+        if perm not in ROLE_PERMISSIONS.get(role, set()):
+            raise HTTPException(status_code=403, detail="Недостаточно прав для этого действия")
 
-    async def create_invite(self, room_id: str, user_id: str) -> dict:
-        # Только владелец раздаёт права со-администратора.
+    async def create_invite(self, room_id: str, user_id: str, role: str) -> dict:
         await self._assert_owner(room_id, user_id)
+        if role not in set(AdminRole):
+            raise HTTPException(status_code=400, detail="Неизвестная роль")
+        if await self._qr.count_active_invites(room_id) >= self._settings.max_invites_per_room:
+            raise HTTPException(status_code=400, detail="Слишком много активных приглашений")
+
         token = generate_invite_token()
-        await self._qr.create_invite(room_id, token)
-        logger.info("Invite for room %s created by %s", room_id, user_id)
-        return {"token": token}
+        await self._qr.create_invite(room_id, token, role)
+        logger.info("Invite (%s) for room %s created by %s", role, room_id, user_id)
+        return {"token": token, "role": role}
 
     async def accept_invite(self, room_id: str, token: str, user_id: str) -> dict:
         if not await self._qr.room_exists(room_id):
             raise HTTPException(status_code=404, detail="Комната не существует")
 
-        # Идемпотентность: если пользователь уже админ этой комнаты (повторный
-        # клик/двойной вызов StrictMode/уже погашенный токен) — просто заново
-        # выдаём админ-токен, не требуя валидного приглашения.
         if await self._qr.is_admin(room_id, user_id):
-            access = self._auth.create_token(user_id, role="admin", room_id=room_id)
+            access = self._auth.create_token(user_id, role=UserRole.ADMIN, room_id=room_id)
             return {"room_id": room_id, "access_token": access}
 
-        if not await self._qr.consume_invite(room_id, token):
+        role = await self._qr.consume_invite(room_id, token)
+        if role is None:
             raise HTTPException(status_code=400, detail="Приглашение недействительно или истекло")
 
-        await self._qr.add_admin(room_id, user_id)
-        access = self._auth.create_token(user_id, role="admin", room_id=room_id)
-        logger.info("User %s became co-admin of room %s", user_id, room_id)
+        await self._qr.add_admin(room_id, user_id, role)
+        access = self._auth.create_token(user_id, role=UserRole.ADMIN, room_id=room_id)
+        logger.info("User %s became co-admin (%s) of room %s", user_id, role, room_id)
         return {"room_id": room_id, "access_token": access}
 
+    async def list_co_admins(self, room_id: str, user_id: str) -> dict:
+        await self._assert_owner(room_id, user_id)
+        admins = await self._qr.list_admins(room_id)
+        active_invites = await self._qr.count_active_invites(room_id)
+        return {
+            "admins": [{"user_id": uid, "role": role} for uid, role in admins.items()],
+            "active_invites": active_invites,
+        }
+
+    async def revoke_co_admin(self, room_id: str, user_id: str, target_user: str) -> dict:
+        await self._assert_owner(room_id, user_id)
+        await self._qr.remove_admin(room_id, target_user)
+        await self._pub.publish(
+            room_id, {"type": WsMessageType.UPDATE, "data": {"admin_revoked": target_user}}
+        )
+        logger.info("Co-admin %s revoked from room %s by %s", target_user, room_id, user_id)
+        return {"status": "revoked"}
+
     async def resume_admin(self, room_id: str, user_id: str) -> dict:
-        # Восстановление админ-сессии после перезагрузки страницы (access-токен
-        # живёт только в памяти). Не мутирует состояние, талон не создаёт.
         if not await self._qr.room_exists(room_id):
             raise HTTPException(status_code=404, detail="Комната не существует")
         if not await self._qr.is_admin(room_id, user_id):
             raise HTTPException(status_code=403, detail="Нет прав администратора")
-        access = self._auth.create_token(user_id, role="admin", room_id=room_id)
+        access = self._auth.create_token(user_id, role=UserRole.ADMIN, room_id=room_id)
         is_owner = await self._qr.get_owner(room_id) == user_id
         return {"room_id": room_id, "access_token": access, "is_owner": is_owner}
 
     async def leave_admin(self, room_id: str, user_id: str) -> dict:
-        # Со-администратор слагает права. Владельца не выпускаем — он закрывает
-        # комнату отдельным действием (иначе комната осталась бы без хозяина).
         owner = await self._qr.get_owner(room_id)
         if owner == user_id:
             raise HTTPException(
@@ -182,7 +206,9 @@ class RoomService:
     async def close_room(self, room_id: str, user_id: str) -> RoomClosed:
         await self._assert_owner(room_id, user_id)
 
-        await self._pub.publish(room_id, {"type": "update", "data": {"room_closed": True}})
+        await self._pub.publish(
+            room_id, {"type": WsMessageType.UPDATE, "data": {"room_closed": True}}
+        )
         await self._qr.delete_all(room_id)
         await self._rr.close(room_id)
 
@@ -191,7 +217,7 @@ class RoomService:
         return RoomClosed(status="closed")
 
     async def add_queue(self, room_id: str, user_id: str) -> QueueAdded:
-        await self._assert_admin(room_id, user_id)
+        await self._assert_permission(room_id, user_id, Permission.QUEUES)
 
         async with self._qr.lock(room_id):
             queues = await self._qr.load_all(room_id)
@@ -206,15 +232,13 @@ class RoomService:
                 raise HTTPException(status_code=400, detail="Достигнут максимум очередей") from None
 
             existing_codes = {q.code for q in queues if q.code}
-            code = generate_queue_code()
+            code = generate_queue_code(self._settings.queue_code_length)
             while code in existing_codes:
-                code = generate_queue_code()
+                code = generate_queue_code(self._settings.queue_code_length)
 
             new_queue = Queue(label=label, room_id=room_id, code=code)
             longest = max(queues, key=lambda q: len(q.waiting), default=None)
 
-            # Перебалансировка — доменная политика очереди: половина с хвоста
-            # самой длинной переезжает в новую. При <2 ожидающих перенос пустой.
             if longest is not None:
                 moved = longest.split_off_half()
                 if moved:
@@ -223,12 +247,12 @@ class RoomService:
 
             await self._qr.save(new_queue)
 
-        await self._pub.publish(room_id, {"type": "update"})
+        await self._pub.publish(room_id, {"type": WsMessageType.UPDATE})
 
         return QueueAdded(queue_label=label, code=code)
 
     async def remove_queue(self, room_id: str, label: str, user_id: str) -> QueueRemoved:
-        await self._assert_admin(room_id, user_id)
+        await self._assert_permission(room_id, user_id, Permission.QUEUES)
 
         async with self._qr.lock(room_id):
             queues = await self._qr.load_all(room_id)
@@ -242,7 +266,6 @@ class RoomService:
             target = next(q for q in queues if q.label == label)
             remaining = [q for q in queues if q.label != label]
 
-            # Перераспределяем ожидающих удаляемой очереди в самые короткие из оставшихся.
             for ticket in target.waiting:
                 shortest = min(remaining, key=lambda q: len(q.waiting))
                 shortest.absorb([ticket])
@@ -252,12 +275,12 @@ class RoomService:
 
             await self._qr.delete(room_id, label)
 
-        await self._pub.publish(room_id, {"type": "update"})
+        await self._pub.publish(room_id, {"type": WsMessageType.UPDATE})
 
         return QueueRemoved(queue_label=label)
 
     async def call_next(self, room_id: str, label: str, user_id: str) -> NextCalled:
-        await self._assert_admin(room_id, user_id)
+        await self._assert_permission(room_id, user_id, Permission.QUEUES)
 
         async with self._qr.lock(room_id):
             queue = await self._qr.load(room_id, label)
@@ -273,14 +296,14 @@ class RoomService:
             await self._qr.save(queue)
 
         await self._tr.mark_called(room_id, label, ticket.num, datetime.now(UTC))
-        await self._pub.publish(room_id, {"type": "update"})
+        await self._pub.publish(room_id, {"type": WsMessageType.UPDATE})
 
         logger.info("Ticket %s (queue %s) called in room %s", ticket.num, label, room_id)
 
         return NextCalled(queue_label=label, ticket=ticket.num)
 
     async def complete_serving(self, room_id: str, label: str, user_id: str) -> None:
-        await self._assert_admin(room_id, user_id)
+        await self._assert_permission(room_id, user_id, Permission.QUEUES)
 
         async with self._qr.lock(room_id):
             queue = await self._qr.load(room_id, label)
@@ -304,7 +327,7 @@ class RoomService:
             serve_seconds = int((now - serving_since).total_seconds())
             await self._qr.update_avg_serve(room_id, max(serve_seconds, 0))
 
-        await self._pub.publish(room_id, {"type": "update"})
+        await self._pub.publish(room_id, {"type": WsMessageType.UPDATE})
 
     async def skip_serving(self, room_id: str, label: str, user_id: str) -> None:
         """Пропустить текущего вызванного, НЕ засчитывая в статистику обслуживания.
@@ -312,7 +335,7 @@ class RoomService:
         Талон просто снимается с приёма (без mark_completed), поэтому в истории
         у него нет completed_at и он не влияет на среднее время/счётчик обслуженных.
         """
-        await self._assert_admin(room_id, user_id)
+        await self._assert_permission(room_id, user_id, Permission.QUEUES)
 
         async with self._qr.lock(room_id):
             queue = await self._qr.load(room_id, label)
@@ -327,7 +350,7 @@ class RoomService:
 
             await self._qr.save(queue)
 
-        await self._pub.publish(room_id, {"type": "update"})
+        await self._pub.publish(room_id, {"type": WsMessageType.UPDATE})
         logger.info("Ticket %s (queue %s) skipped in room %s", ticket.num, label, room_id)
 
     async def move_ticket(
@@ -336,7 +359,7 @@ class RoomService:
         """Переместить ожидающий талон (по его номеру) в другую очередь и/или
         на новую позицию. Идентифицируем по номеру талона, а не по fingerprint —
         чтобы не раскрывать клиентские ID в админ-интерфейсе."""
-        await self._assert_admin(room_id, user_id)
+        await self._assert_permission(room_id, user_id, Permission.QUEUES)
 
         async with self._qr.lock(room_id):
             queues = await self._qr.load_all(room_id)
@@ -353,7 +376,6 @@ class RoomService:
                     break
 
             if ticket is None:
-                # Либо номер неизвестен, либо талон сейчас на приёме (не в waiting).
                 raise HTTPException(status_code=404, detail="Талон не найден среди ожидающих")
 
             if source.label == dest.label:
@@ -367,7 +389,7 @@ class RoomService:
                 await self._qr.save(source)
                 await self._qr.save(dest)
 
-        await self._pub.publish(room_id, {"type": "update"})
+        await self._pub.publish(room_id, {"type": WsMessageType.UPDATE})
         logger.info("Ticket %s moved to %s[%s] in room %s", ticket_num, to_label, to_index, room_id)
 
     async def get_stats(self, room_id: str) -> dict:
@@ -409,7 +431,7 @@ class RoomService:
         now = datetime.now(UTC)
 
         my_ticket, my_queue, my_pos = "--", "", "Нет в очереди"
-        my_status, my_elapsed = "waiting", 0
+        my_status, my_elapsed = QueueState.WAITING, 0
         my_ticket_status = ""
         global_elapsed = 0
         queue_infos = []
@@ -421,7 +443,7 @@ class RoomService:
                 global_elapsed = max(global_elapsed, label_elapsed)
 
             current_ticket = queue.serving.num if queue.serving else ""
-            # Детальный список ожидающих: номер талона + само-статус посетителя.
+
             waiting_detail = [
                 {"ticket": t.num, "status": t.status, "position": i + 1}
                 for i, t in enumerate(queue.waiting)
@@ -431,7 +453,7 @@ class RoomService:
                     "label": queue.label,
                     "code": queue.code,
                     "length": len(queue.waiting),
-                    "status": "serving" if queue.serving else "waiting",
+                    "status": QueueState.SERVING if queue.serving else QueueState.WAITING,
                     "current_ticket": f"№ {current_ticket}" if current_ticket else "ОЖИДАНИЕ",
                     "current_status": queue.serving.status if queue.serving else "",
                     "elapsed_time": label_elapsed,
@@ -443,7 +465,7 @@ class RoomService:
                 my_ticket = f"№ {queue.serving.num}"
                 my_queue = queue.label
                 my_pos = "На приеме"
-                my_status = "serving"
+                my_status = QueueState.SERVING
                 my_ticket_status = queue.serving.status
                 my_elapsed = label_elapsed
             else:
@@ -455,7 +477,7 @@ class RoomService:
                     my_queue = queue.label
                     offset = 1 if queue.serving else 0
                     my_pos = str(pos + offset)
-                    my_status = "waiting"
+                    my_status = QueueState.WAITING
 
         return {
             "room_closed": False,

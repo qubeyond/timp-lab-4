@@ -1,9 +1,7 @@
-// Управление web-уведомлениями через service worker.
-// SW нужен для «висящих» уведомлений (requireInteraction) и фоновой доставки.
 
 let swReg: ServiceWorkerRegistration | null = null
 
-const NOTIF_TAG = 'queue-ticket' // фиксированный тег: новое уведомление заменяет старое
+const NOTIF_TAG = 'queue-ticket'
 
 export function notificationsSupported(): boolean {
   return 'Notification' in window && 'serviceWorker' in navigator
@@ -33,7 +31,7 @@ export async function requestNotificationPermission(): Promise<NotificationPermi
 interface NotifyOptions {
   title: string
   body?: string
-  /** Висящее уведомление (не исчезает само), требует действия пользователя. */
+
   sticky?: boolean
 }
 
@@ -55,7 +53,7 @@ export async function showNotification({ title, body, sticky }: NotifyOptions): 
   const options: NotificationOptions = {
     body,
     tag: NOTIF_TAG,
-    // requireInteraction поддерживается не везде, но где есть — даёт «висящий» увед.
+
     requireInteraction: !!sticky,
     renotify: true,
   } as NotificationOptions
@@ -64,7 +62,7 @@ export async function showNotification({ title, body, sticky }: NotifyOptions): 
   if (reg) {
     await reg.showNotification(title, options)
   } else if ('Notification' in window) {
-    // Фолбэк без SW (увед обычный, смахиваемый).
+
     new Notification(title, options)
   }
 }

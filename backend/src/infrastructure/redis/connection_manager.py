@@ -9,15 +9,19 @@ from fastapi import WebSocket
 logger = logging.getLogger(__name__)
 
 
-# Максимум одновременных WS-подключений на одного пользователя (анти-DoS).
 MAX_CONNECTIONS_PER_USER = 5
 
 
 class RoomConnectionManager:
-    def __init__(self, redis: aioredis.Redis) -> None:
+    def __init__(self, redis: aioredis.Redis, max_connections_per_user: int = 5) -> None:
         self._r = redis
-        # websocket -> (user_id, pubsub listener task)
+        self._max_conn = max_connections_per_user
+
         self._connections: dict[str, dict[WebSocket, tuple[str, asyncio.Task]]] = {}
+
+    @property
+    def max_connections_per_user(self) -> int:
+        return self._max_conn
 
     def user_connection_count(self, user_id: str) -> int:
         return sum(
@@ -37,8 +41,7 @@ class RoomConnectionManager:
         entry = room.pop(websocket, None)
         if entry is not None:
             _, task = entry
-            # Останавливаем зависший pubsub.listen(), иначе таск и подписка
-            # на Redis-канал живут вечно и текут на каждом реконнекте.
+
             task.cancel()
 
         if not room:

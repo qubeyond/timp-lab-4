@@ -16,7 +16,9 @@ from src.domain.repositories import (
 from src.ioc import ServiceProvider
 from src.services.auth import AuthService
 
-_settings = Settings()
+# В тестах принудительно отключаем внешние интеграции (Telegram), чтобы прогон
+# не слал реальные сообщения, даже если в локальном .env заданы токен и chat_id.
+_settings = Settings(TELEGRAM_BOT_TOKEN="", TELEGRAM_CHAT_ID="")
 _auth = AuthService(_settings)
 
 
@@ -67,10 +69,13 @@ def make_queue_repo_mock() -> AsyncMock:
     mock.set_room_flags.return_value = None
     mock.find_label_by_code.return_value = None
     mock.is_admin.return_value = True
+    mock.get_admin_role.return_value = "owner"
     mock.add_admin.return_value = None
     mock.remove_admin.return_value = None
+    mock.list_admins.return_value = {}
     mock.create_invite.return_value = None
-    mock.consume_invite.return_value = True
+    mock.consume_invite.return_value = "full"
+    mock.count_active_invites.return_value = 0
     mock.revoke_token.return_value = None
     mock.is_token_revoked.return_value = False
 

@@ -12,13 +12,14 @@ from src.api.schemas.queue import (
     StatusRequest,
     TakeTicketResponse,
 )
+from src.config import settings
 from src.services.visitor import VisitorService
 
 router = APIRouter(prefix="/queue", tags=["queue"])
 
 
 @router.post("/ticket", response_model=TakeTicketResponse)
-@limiter.limit("30/minute")
+@limiter.limit(settings.rate_limit_queue)
 @inject
 async def take_ticket(
     request: Request,
@@ -44,7 +45,7 @@ async def take_ticket(
 
 
 @router.post("/leave", response_model=LeaveQueueResponse)
-@limiter.limit("30/minute")
+@limiter.limit(settings.rate_limit_queue)
 @inject
 async def leave_queue(
     request: Request,
@@ -58,7 +59,7 @@ async def leave_queue(
 
 
 @router.post("/status", response_model=LeaveQueueResponse)
-@limiter.limit("30/minute")
+@limiter.limit(settings.rate_limit_queue)
 @inject
 async def set_status(
     request: Request,

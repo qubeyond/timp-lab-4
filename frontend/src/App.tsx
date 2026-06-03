@@ -4,7 +4,9 @@ import { UserPage } from '@/pages/UserPage'
 import { AdminPage } from '@/pages/AdminPage'
 import { ErrorPage } from '@/pages/ErrorPage'
 import { ToastContainer } from '@/components/ToastContainer'
+import { Footer } from '@/components/Footer'
 import { useToast } from '@/hooks/useToast'
+import { Role } from '@/constants'
 import {
   ROOM_KEY,
   ROLE_KEY,
@@ -21,6 +23,7 @@ export default function App() {
   const [page, setPage] = useState<Page>('main')
   const [roomId, setRoomId] = useState('')
   const [appState, setAppState] = useState<AppState>('loading')
+  const [version, setVersion] = useState('')
   const { toasts, addToast, removeToast } = useToast()
 
   useEffect(() => {
@@ -31,6 +34,11 @@ export default function App() {
     try {
       const res = await fetch('/health')
       if (res.ok) {
+
+        try {
+          const data = await res.json()
+          if (data?.version) setVersion(data.version)
+        } catch {  }
         setAppState('ok')
         restoreSession()
       } else {
@@ -42,9 +50,7 @@ export default function App() {
   }
 
   async function restoreSession() {
-    // Если в URL есть параметры входа (?room=/?invite=/?code=), приоритет у них —
-    // их обрабатывает MainPage, а восстановление сессии не должно вмешиваться
-    // (иначе гонка: лишний queue/ticket и случайный талон для со-админа).
+
     const params = new URLSearchParams(window.location.search)
     if (params.get('room') || params.get('invite')) return
 
@@ -59,9 +65,8 @@ export default function App() {
       return
     }
 
-    if (savedRole === 'admin') {
-      // Восстанавливаем админ-сессию НЕ мутирующим запросом: /admin/resume
-      // переоформляет админ-токен и не создаёт талон (в отличие от queue/ticket).
+    if (savedRole === Role.ADMIN) {
+
       try {
         const res = await apiFetch('/api/v1/admin/resume', {
           method: 'POST',
@@ -93,14 +98,14 @@ export default function App() {
 
   function handleJoinAsUser(rId: string) {
     localStorage.setItem(ROOM_KEY, rId)
-    localStorage.setItem(ROLE_KEY, 'user')
+    localStorage.setItem(ROLE_KEY, Role.USER)
     setRoomId(rId)
     setPage('user')
   }
 
   function handleJoinAsAdmin(rId: string) {
     localStorage.setItem(ROOM_KEY, rId)
-    localStorage.setItem(ROLE_KEY, 'admin')
+    localStorage.setItem(ROLE_KEY, Role.ADMIN)
     setRoomId(rId)
     setPage('admin')
   }
@@ -173,6 +178,8 @@ export default function App() {
           onToast={addToast}
         />
       )}
+
+      <Footer roomId={roomId || undefined} version={version} onToast={addToast} />
     </>
   )
 }

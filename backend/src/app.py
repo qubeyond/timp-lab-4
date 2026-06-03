@@ -10,15 +10,12 @@ from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.api.limiter import limiter
-from src.api.routers import admin, auth, health, queue, rooms, ws
-from src.config import Settings
+from src.api.routers import admin, auth, feedback, health, queue, rooms, ws
+from src.config import Settings, settings
 from src.infrastructure.db.base import init_db
 from src.ioc import create_container
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+logging.basicConfig(level=settings.log_level, format=settings.log_format)
 
 
 def create_app() -> FastAPI:
@@ -35,7 +32,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="Queue Service",
-        version="1.0.0",
+        version=settings.app_version,
         lifespan=lifespan,
         docs_url="/docs" if settings.debug else None,
         redoc_url="/redoc" if settings.debug else None,
@@ -61,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(rooms.router, prefix="/api/v1")
     app.include_router(queue.router, prefix="/api/v1")
     app.include_router(admin.router, prefix="/api/v1")
+    app.include_router(feedback.router, prefix="/api/v1")
     app.include_router(ws.router)
 
     return app

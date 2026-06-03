@@ -20,6 +20,7 @@ async def healthcheck():
 @inject
 async def health(settings: FromDishka[Settings]):
     checks: dict[str, str] = {}
+    version = settings.app_version
 
     try:
         r = aioredis.from_url(settings.redis_url, decode_responses=True)
@@ -45,5 +46,5 @@ async def health(settings: FromDishka[Settings]):
 
     return JSONResponse(
         status_code=200 if ok else 503,
-        content={"status": "ok" if ok else "degraded", **checks},
+        content={"status": "ok" if ok else "degraded", "version": version, **checks},
     )

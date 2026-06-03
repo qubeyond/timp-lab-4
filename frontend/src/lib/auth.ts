@@ -24,10 +24,20 @@ export function authHeaders(): Record<string, string> {
   }
 }
 
+const NETWORK_ERROR = 'Нет связи с сервером. Проверьте подключение и попробуйте снова.'
+
+async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init)
+  } catch {
+    throw new Error(NETWORK_ERROR)
+  }
+}
+
 export async function ensureToken(): Promise<void> {
   if (accessToken) return
 
-  const refreshRes = await fetch('/api/v1/auth/refresh', {
+  const refreshRes = await safeFetch('/api/v1/auth/refresh', {
     method: 'POST',
     credentials: 'include',
   })
@@ -37,12 +47,11 @@ export async function ensureToken(): Promise<void> {
     return
   }
 
-  // Личность выдаёт сервер (в httpOnly refresh-куке). Клиент ничего не задаёт.
-  const res = await fetch('/api/v1/auth/token', {
+  const res = await safeFetch('/api/v1/auth/token', {
     method: 'POST',
     credentials: 'include',
   })
-  if (!res.ok) throw new Error('Ошибка получения токена')
+  if (!res.ok) throw new Error('Не удалось подключиться. Попробуйте позже.')
   const data: TokenResponse = await res.json()
   accessToken = data.access_token
 }
@@ -52,9 +61,9 @@ export async function apiFetch(url: string, options: RequestInit = {}): Promise<
   options.credentials = 'include'
   options.headers = { ...authHeaders(), ...(options.headers as Record<string, string> || {}) }
 
-  const res = await fetch(url, options)
+  const res = await safeFetch(url, options)
   if (res.status === 401) {
-    const refreshRes = await fetch('/api/v1/auth/refresh', {
+    const refreshRes = await safeFetch('/api/v1/auth/refresh', {
       method: 'POST',
       credentials: 'include',
     })
@@ -62,7 +71,7 @@ export async function apiFetch(url: string, options: RequestInit = {}): Promise<
       const data: TokenResponse = await refreshRes.json()
       accessToken = data.access_token
       options.headers = { ...authHeaders(), ...(options.headers as Record<string, string> || {}) }
-      return fetch(url, options)
+      return safeFetch(url, options)
     }
     accessToken = ''
     throw new Error('Сессия истекла. Попробуйте снова.')

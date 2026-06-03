@@ -12,13 +12,14 @@ from src.api.schemas.rooms import (
     RoomCreateResponse,
     RoomStateResponse,
 )
+from src.config import settings
 from src.services.room import RoomService
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
 
 
 @router.post("", response_model=RoomCreateResponse)
-@limiter.limit("10/minute")
+@limiter.limit(settings.rate_limit_admin)
 @inject
 async def create_room(
     request: Request,
@@ -35,7 +36,7 @@ async def create_room(
 
 
 @router.delete("/{room_id}", response_model=RoomCloseResponse)
-@limiter.limit("10/minute")
+@limiter.limit(settings.rate_limit_admin)
 @inject
 async def close_room(
     request: Request,

@@ -1,19 +1,8 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 
-QUEUE_LABELS = list("ABCDEFGHJK")
-MAX_QUEUES = 10
-DEFAULT_QUEUE = "A"
-ROOM_ID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-ROOM_ID_LENGTH = 6
-QUEUE_CODE_LENGTH = 4
-
-# Статусы ожидающего талона. serving не входит — приём отслеживается через
-# Queue.serving. on_way/no_show — самоинформирование посетителя для админа.
-TICKET_WAITING = "waiting"
-TICKET_ON_WAY = "on_way"
-TICKET_NO_SHOW = "no_show"
-TICKET_STATUSES = {TICKET_WAITING, TICKET_ON_WAY, TICKET_NO_SHOW}
+from src.domain.constants import MAX_QUEUES, QUEUE_LABELS
+from src.domain.enums import TicketStatus
 
 
 @dataclass(frozen=True)
@@ -43,7 +32,7 @@ class Ticket:
     user_id: str
     queue_label: str
     room_id: str
-    status: str = TICKET_WAITING
+    status: str = TicketStatus.WAITING
 
     @staticmethod
     def build_num(label: str, count: int) -> str:
@@ -58,15 +47,13 @@ class Queue:
     serving: Ticket | None = None
     serving_since: datetime | None = None
     ticket_counter: int = 0
-    # Короткий код для прямого входа в очередь (VIP-сценарий, балансировщик off).
+
     code: str = ""
 
     def total_length(self) -> int:
         return len(self.waiting) + (1 if self.serving else 0)
 
     def set_status(self, user_id: str, status: str) -> Ticket | None:
-        # Статус ставится и ожидающему, и вызванному (serving) талону —
-        # «Я иду / Не приду» актуальны именно когда посетителя вызвали.
         if self.serving is not None and self.serving.user_id == user_id:
             self.serving.status = status
             return self.serving
@@ -76,7 +63,6 @@ class Queue:
         return ticket
 
     def move_ticket(self, user_id: str, to_index: int) -> bool:
-        """Переставить ожидающего на новую позицию внутри очереди (0-based)."""
         idx = next((i for i, t in enumerate(self.waiting) if t.user_id == user_id), None)
         if idx is None:
             return False
@@ -137,12 +123,6 @@ class Queue:
         return ticket
 
     def split_off_half(self) -> list[Ticket]:
-        """Снять половину (с округлением вниз) ожидающих с хвоста очереди.
-
-        Политика ребалансировки при создании новой очереди. При 0 или 1
-        ожидающем возвращает пустой список — переносить нечего, очередь
-        остаётся непустой/нетронутой.
-        """
         move_count = len(self.waiting) // 2
         if move_count == 0:
             return []
@@ -151,7 +131,6 @@ class Queue:
         return moved
 
     def absorb(self, tickets: list[Ticket]) -> None:
-        """Принять перенесённые из другой очереди талоны, переметив их."""
         for t in tickets:
             t.queue_label = self.label
             self.waiting.append(t)
@@ -164,11 +143,9 @@ class Room:
     owner_id: str
     queue_labels: list[str] = field(default_factory=list)
     closed: bool = False
-    # Приём заявок открыт. Закрытая комната существует (по ссылке видна), но
-    # талоны брать нельзя, пока админ не откроет вход.
+
     is_open: bool = True
-    # Балансировщик распределяет новых по самой короткой очереди. Если выключен —
-    # посетитель попадает только в явно выбранную очередь (по коду/метке).
+
     balancer_enabled: bool = True
 
     def is_closed(self) -> bool:

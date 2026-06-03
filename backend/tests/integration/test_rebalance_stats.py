@@ -1,6 +1,7 @@
 import pytest
 
-from src.domain.entities import DEFAULT_QUEUE, Queue
+from src.domain.constants import DEFAULT_QUEUE
+from src.domain.entities import Queue
 
 pytestmark = pytest.mark.integration
 

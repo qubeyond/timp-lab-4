@@ -11,9 +11,9 @@ export type ButtonVariant =
 interface Props extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'className'> {
   variant?: ButtonVariant
   size?: 'md' | 'sm'
-  /** Растянуть на всю ширину контейнера (по умолчанию да). */
+
   fullWidth?: boolean
-  /** Показать спиннер и заблокировать кнопку. */
+
   loading?: boolean
   children: ReactNode
   className?: string

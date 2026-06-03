@@ -20,6 +20,7 @@ from src.infrastructure.db.repositories import SQLAlchemyRoomRepository, SQLAlch
 from src.infrastructure.redis.connection_manager import RoomConnectionManager
 from src.infrastructure.redis.queue_repo import RedisQueueRepository
 from src.services.auth import AuthService
+from src.services.feedback import FeedbackService
 from src.services.room import RoomService
 from src.services.visitor import VisitorService
 
@@ -49,11 +50,16 @@ class InfrastructureProvider(Provider):
 
     @provide
     def queue_repo(self, redis: aioredis.Redis, settings: Settings) -> QueueRepository:
-        return RedisQueueRepository(redis, settings.queue_ttl)
+        return RedisQueueRepository(
+            redis,
+            settings.queue_ttl,
+            invite_ttl=settings.invite_ttl_seconds,
+            lock_timeout=settings.room_lock_timeout,
+        )
 
     @provide
-    def publisher(self, redis: aioredis.Redis) -> EventPublisher:
-        return RoomConnectionManager(redis)
+    def publisher(self, redis: aioredis.Redis, settings: Settings) -> EventPublisher:
+        return RoomConnectionManager(redis, settings.ws_max_connections_per_user)
 
 
 class SessionProvider(Provider):
@@ -80,6 +86,10 @@ class ServiceProvider(Provider):
     def auth_service(self, settings: Settings) -> AuthService:
         return AuthService(settings)
 
+    @provide(scope=Scope.APP)
+    def feedback_service(self, settings: Settings) -> FeedbackService:
+        return FeedbackService(settings)
+
     @provide
     def room_service(
         self,
@@ -88,8 +98,9 @@ class ServiceProvider(Provider):
         ticket_repo: TicketRepository,
         auth_service: AuthService,
         publisher: EventPublisher,
+        settings: Settings,
     ) -> RoomService:
-        return RoomService(queue_repo, room_repo, ticket_repo, auth_service, publisher)
+        return RoomService(queue_repo, room_repo, ticket_repo, auth_service, publisher, settings)
 
     @provide
     def visitor_service(

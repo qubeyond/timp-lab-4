@@ -14,6 +14,7 @@ import {
   clearTicketNotification,
 } from '@/lib/notifications'
 import type { RoomStateResponse, WsMessage } from '@/types/api'
+import { QueueState, WsMessageType } from '@/constants'
 
 interface Props {
   roomId: string
@@ -39,7 +40,7 @@ function formatPosition(posLabel: string, queueLabel: string): string {
 }
 
 function notifyServing(ticket: string) {
-  // Висящее (несмахиваемое) уведомление с краткой информацией о талоне.
+
   void showNotification({
     title: 'Ваша очередь подошла!',
     body: `Талон ${ticket} — подойдите к администратору`,
@@ -73,7 +74,7 @@ export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: P
   const roomIdRef = useRef(roomId)
   roomIdRef.current = roomId
 
-  const isServing = state?.current_status === 'serving'
+  const isServing = state?.current_status === QueueState.SERVING
   const elapsed = useTimer(state?.elapsed_time ?? 0, isServing)
 
   function handleState(data: RoomStateResponse) {
@@ -86,8 +87,8 @@ export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: P
     if (ctx?.ticket_label && ctx.ticket_label !== '--') hadTicket.current = true
 
     if (
-      data.current_status === 'serving' &&
-      prevStatusRef.current !== 'serving' &&
+      data.current_status === QueueState.SERVING &&
+      prevStatusRef.current !== QueueState.SERVING &&
       ctx?.ticket_label &&
       ctx.ticket_label !== '--'
     ) {
@@ -109,7 +110,6 @@ export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: P
       .catch(() => {})
   }
 
-  // Очистить висящее уведомление, когда сессия пользователя завершилась.
   useEffect(() => {
     return () => { void clearTicketNotification() }
   }, [])
@@ -170,8 +170,8 @@ export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: P
         if (destroyed || event.data === 'pong') return
         let msg: WsMessage
         try { msg = JSON.parse(event.data) as WsMessage } catch { return }
-        if (msg.type === 'welcome' && msg.data) { handleState(msg.data); return }
-        if (msg.type === 'update') {
+        if (msg.type === WsMessageType.WELCOME && msg.data) { handleState(msg.data); return }
+        if (msg.type === WsMessageType.UPDATE) {
           if (msg.data?.room_closed) {
             if (!closedRef.current) { closedRef.current = true; onRoomClosedRef.current() }
             return
@@ -254,8 +254,8 @@ export function UserPage({ roomId, onLeave, onServed, onRoomClosed, onToast }: P
 
           <div className="stat-row">
             <span className="stat-label">Статус</span>
-            <span className={`chip ${state?.current_status === 'serving' ? 'serving' : 'waiting'}`}>
-              {state?.current_status === 'serving' ? 'Идёт приём' : 'Ожидание'}
+            <span className={`chip ${state?.current_status === QueueState.SERVING ? QueueState.SERVING : QueueState.WAITING}`}>
+              {state?.current_status === QueueState.SERVING ? 'Идёт приём' : 'Ожидание'}
             </span>
           </div>
 

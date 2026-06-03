@@ -3,7 +3,9 @@
 import pytest
 from fastapi import HTTPException
 
-from src.domain.entities import DEFAULT_QUEUE, TICKET_ON_WAY, Queue
+from src.domain.constants import DEFAULT_QUEUE
+from src.domain.entities import Queue
+from src.domain.enums import TicketStatus
 from src.infrastructure.redis.queue_repo import generate_queue_code
 
 pytestmark = pytest.mark.integration
@@ -75,11 +77,11 @@ async def test_delete_queue_removes_code_index(queue_repo):
 async def test_ticket_status_persists(queue_repo):
     q = Queue(label="A", room_id=ROOM)
     q.enqueue("u1")
-    q.set_status("u1", TICKET_ON_WAY)
+    q.set_status("u1", TicketStatus.ON_WAY)
     await queue_repo.save(q)
 
     loaded = await queue_repo.load(ROOM, "A")
-    assert loaded.waiting[0].status == TICKET_ON_WAY
+    assert loaded.waiting[0].status == TicketStatus.ON_WAY
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +251,7 @@ async def test_invite_flow_makes_co_admin(queue_repo, room_service):
     # Изначально посторонний — не админ.
     assert await queue_repo.is_admin(ROOM, "helper") is False
 
-    invite = await room_service.create_invite(ROOM, OWNER)
+    invite = await room_service.create_invite(ROOM, OWNER, "full")
     accepted = await room_service.accept_invite(ROOM, invite["token"], "helper")
 
     assert accepted["room_id"] == ROOM
@@ -258,7 +260,7 @@ async def test_invite_flow_makes_co_admin(queue_repo, room_service):
 
 async def test_invite_is_single_use(queue_repo, room_service):
     await _open_room(queue_repo)
-    invite = await room_service.create_invite(ROOM, OWNER)
+    invite = await room_service.create_invite(ROOM, OWNER, "full")
     await room_service.accept_invite(ROOM, invite["token"], "helper1")
 
     from fastapi import HTTPException
@@ -270,7 +272,7 @@ async def test_invite_is_single_use(queue_repo, room_service):
 
 async def test_co_admin_can_mutate_owner_keeps_close(queue_repo, room_service, visitor_service):
     await _open_room(queue_repo)
-    invite = await room_service.create_invite(ROOM, OWNER)
+    invite = await room_service.create_invite(ROOM, OWNER, "full")
     await room_service.accept_invite(ROOM, invite["token"], "helper")
     await visitor_service.take_ticket(ROOM, "A", "u1")
 
@@ -289,21 +291,92 @@ async def test_co_admin_can_mutate_owner_keeps_close(queue_repo, room_service, v
 
 async def test_non_owner_cannot_invite(queue_repo, room_service):
     await _open_room(queue_repo)
-    invite = await room_service.create_invite(ROOM, OWNER)
+    invite = await room_service.create_invite(ROOM, OWNER, "full")
     await room_service.accept_invite(ROOM, invite["token"], "helper")
 
     from fastapi import HTTPException
 
     # Со-админ (helper) не владелец → не может раздавать приглашения.
     with pytest.raises(HTTPException) as exc:
-        await room_service.create_invite(ROOM, "helper")
+        await room_service.create_invite(ROOM, "helper", "full")
     assert exc.value.status_code == 403
+
+
+async def test_role_queues_cannot_change_settings(queue_repo, room_service):
+    """Со-админ с ролью queues управляет очередями, но НЕ настройками."""
+    from fastapi import HTTPException
+
+    await _open_room(queue_repo)
+    invite = await room_service.create_invite(ROOM, OWNER, "queues")
+    await room_service.accept_invite(ROOM, invite["token"], "q_admin")
+
+    # Очереди — можно.
+    await room_service.add_queue(ROOM, "q_admin")
+    # Настройки — нельзя.
+    with pytest.raises(HTTPException) as exc:
+        await room_service.set_balancer(ROOM, "q_admin", False)
+    assert exc.value.status_code == 403
+
+
+async def test_removed_settings_role_rejected(queue_repo, room_service):
+    from fastapi import HTTPException
+
+    await _open_room(queue_repo)
+    with pytest.raises(HTTPException) as exc:
+        await room_service.create_invite(ROOM, OWNER, "settings")
+    assert exc.value.status_code == 400
+
+
+async def test_role_full_can_do_both(queue_repo, room_service, visitor_service):
+    await _open_room(queue_repo)
+    invite = await room_service.create_invite(ROOM, OWNER, "full")
+    await room_service.accept_invite(ROOM, invite["token"], "f_admin")
+    await visitor_service.take_ticket(ROOM, "A", "u1")
+
+    await room_service.set_balancer(ROOM, "f_admin", False)  # настройки
+    await room_service.call_next(ROOM, "A", "f_admin")  # очереди
+    q = await queue_repo.load(ROOM, "A")
+    assert q.serving is not None
+
+
+async def test_owner_lists_and_revokes_co_admin(queue_repo, room_service):
+    await _open_room(queue_repo)
+    invite = await room_service.create_invite(ROOM, OWNER, "queues")
+    await room_service.accept_invite(ROOM, invite["token"], "helper")
+
+    listing = await room_service.list_co_admins(ROOM, OWNER)
+    assert {"user_id": "helper", "role": "queues"} in listing["admins"]
+
+    await room_service.revoke_co_admin(ROOM, OWNER, "helper")
+    assert await queue_repo.is_admin(ROOM, "helper") is False
+
+
+async def test_invite_limit_enforced(queue_repo, room_service):
+    from fastapi import HTTPException
+
+    await _open_room(queue_repo)
+    # Лимит из Settings (max_invites_per_room, дефолт 20). Создаём до предела.
+    limit = room_service._settings.max_invites_per_room
+    for _ in range(limit):
+        await room_service.create_invite(ROOM, OWNER, "full")
+    with pytest.raises(HTTPException) as exc:
+        await room_service.create_invite(ROOM, OWNER, "full")
+    assert exc.value.status_code == 400
+
+
+async def test_invite_unknown_role_rejected(queue_repo, room_service):
+    from fastapi import HTTPException
+
+    await _open_room(queue_repo)
+    with pytest.raises(HTTPException) as exc:
+        await room_service.create_invite(ROOM, OWNER, "superuser")
+    assert exc.value.status_code == 400
 
 
 async def test_accept_invite_idempotent(queue_repo, room_service):
     """Повторный приём приглашения тем же пользователем не падает (StrictMode/реклик)."""
     await _open_room(queue_repo)
-    invite = await room_service.create_invite(ROOM, OWNER)
+    invite = await room_service.create_invite(ROOM, OWNER, "full")
     await room_service.accept_invite(ROOM, invite["token"], "helper")
 
     # Тот же токен уже погашен, но helper уже админ → второй раз ОК.
@@ -314,7 +387,7 @@ async def test_accept_invite_idempotent(queue_repo, room_service):
 
 async def test_co_admin_leave_drops_rights(queue_repo, room_service):
     await _open_room(queue_repo)
-    invite = await room_service.create_invite(ROOM, OWNER)
+    invite = await room_service.create_invite(ROOM, OWNER, "full")
     await room_service.accept_invite(ROOM, invite["token"], "helper")
     assert await queue_repo.is_admin(ROOM, "helper") is True
 
@@ -334,7 +407,7 @@ async def test_owner_cannot_leave(queue_repo, room_service):
 async def test_resume_admin_no_ticket_created(queue_repo, room_service):
     """Восстановление админ-сессии не создаёт талон и переоформляет токен."""
     await _open_room(queue_repo)
-    invite = await room_service.create_invite(ROOM, OWNER)
+    invite = await room_service.create_invite(ROOM, OWNER, "full")
     await room_service.accept_invite(ROOM, invite["token"], "helper")
 
     res = await room_service.resume_admin(ROOM, "helper")

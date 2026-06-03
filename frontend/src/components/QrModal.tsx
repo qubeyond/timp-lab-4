@@ -25,18 +25,13 @@ export function QrModal({ url, roomId, onClose }: Props) {
   const shortCode = roomId || url.split('/').pop() || 'room'
 
   async function handleDownload() {
-    // jspdf тяжёлый и нужен только здесь — грузим лениво, чтобы не раздувать
-    // основной бандл (QR-печать — редкое админское действие).
+
     const { jsPDF } = await import('jspdf')
 
-    // Дождаться шрифтов, иначе canvas отрисует системным фолбэком.
     if (document.fonts?.ready) await document.fonts.ready
 
-    // Встроенные шрифты jsPDF не поддерживают кириллицу (отсюда артефакты).
-    // Поэтому всю печатную страницу рисуем на canvas (браузер умеет кириллицу),
-    // а в PDF вставляем одной картинкой.
-    const scale = 3 // ретина-резкость для печати
-    const W = 794 // A4 @ ~96dpi, портрет
+    const scale = 3
+    const W = 794
     const H = 1123
     const cv = document.createElement('canvas')
     cv.width = W * scale
@@ -56,7 +51,6 @@ export function QrModal({ url, roomId, onClose }: Props) {
     ctx.fillStyle = '#6b6860'
     ctx.fillText('Отсканируйте QR-код, чтобы занять место', W / 2, 168)
 
-    // QR прямо на эту же canvas.
     const qrPx = 420
     const qrX = (W - qrPx) / 2
     const qrY = 230
