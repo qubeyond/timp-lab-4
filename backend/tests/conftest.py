@@ -1,3 +1,4 @@
+import contextlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -50,7 +51,10 @@ def admin_headers(admin_token):
 def make_queue_repo_mock() -> AsyncMock:
     mock = AsyncMock(spec=QueueRepository)
     mock.room_exists.return_value = True
-    mock.get_owner.return_value = None
+    # По умолчанию владелец комнаты — test_admin (совпадает с sub в admin_token),
+    # чтобы админ-эндпоинты проходили проверку владельца. Тесты, где нужен
+    # другой владелец/его отсутствие, переопределяют это значение явно.
+    mock.get_owner.return_value = "test_admin"
     mock.set_owner.return_value = None
     mock.load.return_value = Queue(label="A", room_id="ROOM01")
     mock.load_all.return_value = [Queue(label="A", room_id="ROOM01")]
@@ -59,6 +63,14 @@ def make_queue_repo_mock() -> AsyncMock:
     mock.delete_all.return_value = None
     mock.get_avg_serve.return_value = None
     mock.update_avg_serve.return_value = None
+
+    # lock(room_id) — синхронный метод, возвращающий async-контекст-менеджер.
+    # Подменяем no-op контекстом, чтобы `async with repo.lock(...)` работал в юнит-тестах.
+    @contextlib.asynccontextmanager
+    async def _noop_lock(_room_id):
+        yield
+
+    mock.lock = MagicMock(side_effect=_noop_lock)
     return mock
 
 

@@ -1,131 +1,142 @@
 import pytest
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from src.infrastructure.db.base import init_db
-from src.infrastructure.db.repositories import SQLAlchemyTicketRepo
-from src.infrastructure.redis.queue_manager import RedisQueueRepo
+from src.domain.entities import DEFAULT_QUEUE, Queue
 
 pytestmark = pytest.mark.integration
 
 ROOM = "REBTEST"
+OWNER = "owner_fp"
 
 
-@pytest_asyncio.fixture
-async def db_session():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-    await init_db(engine)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as session:
-        yield session
-    await engine.dispose()
+async def _open_room(queue_repo) -> None:
+    """Создаёт комнату напрямую через репозиторий (детерминированный ID)."""
+    await queue_repo.set_owner(ROOM, OWNER)
+    await queue_repo.save(Queue(label=DEFAULT_QUEUE, room_id=ROOM))
 
 
-@pytest_asyncio.fixture
-async def ticket_repo(db_session: AsyncSession):
-    return SQLAlchemyTicketRepo(db_session)
+async def _take(visitor_service, user_id: str, hint=None):
+    return await visitor_service.take_ticket(ROOM, hint, user_id)
 
 
-async def test_mark_called_after_rebalance_updates_db(repo: RedisQueueRepo, ticket_repo):
-    await repo.init_queue(ROOM, "A")
-    await repo.take_ticket(ROOM, "A", "user1")
-    await repo.take_ticket(ROOM, "A", "user2")
-
-    await ticket_repo.create_event(ROOM, "A", "A1", "user1")
-    await ticket_repo.create_event(ROOM, "A", "A2", "user2")
-
-    await repo.add_queue(ROOM, "B")
-
-    existing1 = await repo.get_existing_ticket(ROOM, "user1")
-    existing2 = await repo.get_existing_ticket(ROOM, "user2")
-    assert existing1 is not None
-    assert existing2 is not None
-
-    label1, ticket1, _ = existing1
-    label2, ticket2, _ = existing2
-
-    served_user, called_ticket, _ = await repo.call_next(ROOM, label1)
-    await ticket_repo.mark_called(ROOM, label1, called_ticket)
-
-    events = await ticket_repo.get_events(ROOM)
-    called = [e for e in events if e.ticket_num == called_ticket]
-    assert len(called) == 1
-    assert called[0].called_at is not None, (
-        f"called_at is None for ticket {called_ticket} after mark_called with label={label1!r} "
-        f"(was originally created with label='A')"
-    )
+async def _lengths(queue_repo) -> dict[str, int]:
+    return {q.label: len(q.waiting) for q in await queue_repo.load_all(ROOM)}
 
 
-async def test_mark_completed_after_rebalance_updates_db(repo: RedisQueueRepo, ticket_repo):
-    await repo.init_queue(ROOM, "A")
-    await repo.take_ticket(ROOM, "A", "user1")
-    await repo.take_ticket(ROOM, "A", "user2")
-
-    await ticket_repo.create_event(ROOM, "A", "A1", "user1")
-    await ticket_repo.create_event(ROOM, "A", "A2", "user2")
-
-    await repo.add_queue(ROOM, "B")
-
-    existing = await repo.get_existing_ticket(ROOM, "user2")
-    assert existing is not None
-    label2, ticket2, _ = existing
-
-    _, called_ticket, _ = await repo.call_next(ROOM, label2)
-    await ticket_repo.mark_called(ROOM, label2, called_ticket)
-
-    _, _, _, _ = await repo.complete_serving(ROOM, label2)
-    await ticket_repo.mark_completed(ROOM, label2, called_ticket)
-
-    events = await ticket_repo.get_events(ROOM)
-    completed = [e for e in events if e.ticket_num == called_ticket]
-    assert len(completed) == 1
-    assert completed[0].called_at is not None, "called_at not set after rebalance"
-    assert completed[0].completed_at is not None, "completed_at not set after rebalance"
-    assert completed[0].serve_seconds is not None
-    assert completed[0].serve_seconds >= 0
+# ---------------------------------------------------------------------------
+# add_queue rebalance — регрессия основного бага
+# ---------------------------------------------------------------------------
 
 
-async def test_stats_counts_rebalanced_ticket_as_completed(repo: RedisQueueRepo, ticket_repo):
-    await repo.init_queue(ROOM, "A")
-    for i in range(1, 5):
-        await repo.take_ticket(ROOM, "A", f"user{i}")
-        await ticket_repo.create_event(ROOM, "A", f"A{i}", f"user{i}")
+async def test_add_queue_with_single_waiting_does_not_empty_source(
+    queue_repo, room_service, visitor_service
+):
+    """Главная регрессия: 1 человек в A, админ создаёт B — человек ОСТАЁТСЯ в A."""
+    await _open_room(queue_repo)
+    await _take(visitor_service, "lonely_user")
 
-    await repo.add_queue(ROOM, "B")
+    await room_service.add_queue(ROOM, OWNER)
 
-    for label in ["A", "B"]:
-        served_user, ticket, _ = await repo.call_next(ROOM, label)
-        await ticket_repo.mark_called(ROOM, label, ticket)
-        await repo.complete_serving(ROOM, label)
-        await ticket_repo.mark_completed(ROOM, label, ticket)
+    lengths = await _lengths(queue_repo)
+    assert lengths == {"A": 1, "B": 0}, f"человека выкинуло из A: {lengths}"
 
-    events = await ticket_repo.get_events(ROOM)
-    completed = [e for e in events if e.completed_at is not None]
-    assert len(completed) == 2, (
-        f"Expected 2 completed tickets (1 from A, 1 from B after rebalance), got {len(completed)}"
-    )
+    # И он реально в A с корректной меткой.
+    a = await queue_repo.load(ROOM, "A")
+    assert a.waiting[0].user_id == "lonely_user"
+    assert a.waiting[0].queue_label == "A"
 
 
-async def test_non_rebalanced_ticket_unaffected(repo: RedisQueueRepo, ticket_repo):
-    await repo.init_queue(ROOM, "A")
-    await repo.take_ticket(ROOM, "A", "user1")
-    await repo.take_ticket(ROOM, "A", "user2")
-    await ticket_repo.create_event(ROOM, "A", "A1", "user1")
-    await ticket_repo.create_event(ROOM, "A", "A2", "user2")
+async def test_add_queue_even_split(queue_repo, room_service, visitor_service):
+    await _open_room(queue_repo)
+    for i in range(4):
+        await _take(visitor_service, f"u{i}", hint="A")
 
-    await repo.add_queue(ROOM, "B")
+    await room_service.add_queue(ROOM, OWNER)
 
-    existing1 = await repo.get_existing_ticket(ROOM, "user1")
-    assert existing1 is not None
-    label1, ticket1, _ = existing1
-    assert label1 == "A", "user1 should stay in A (only every 2nd user is moved)"
+    lengths = await _lengths(queue_repo)
+    assert lengths == {"A": 2, "B": 2}
 
-    _, called_ticket, _ = await repo.call_next(ROOM, "A")
-    await ticket_repo.mark_called(ROOM, "A", called_ticket)
-    await repo.complete_serving(ROOM, "A")
-    await ticket_repo.mark_completed(ROOM, "A", called_ticket)
 
-    events = await ticket_repo.get_events(ROOM)
-    row = next(e for e in events if e.ticket_num == called_ticket)
-    assert row.called_at is not None
-    assert row.completed_at is not None
+async def test_add_queue_odd_keeps_majority_in_source(queue_repo, room_service, visitor_service):
+    await _open_room(queue_repo)
+    for i in range(5):
+        await _take(visitor_service, f"u{i}", hint="A")
+
+    await room_service.add_queue(ROOM, OWNER)
+
+    lengths = await _lengths(queue_repo)
+    assert lengths == {"A": 3, "B": 2}
+
+
+async def test_moved_tickets_keep_their_num_but_change_label(
+    queue_repo, room_service, visitor_service
+):
+    await _open_room(queue_repo)
+    for i in range(4):
+        await _take(visitor_service, f"u{i}", hint="A")
+
+    await room_service.add_queue(ROOM, OWNER)
+
+    b = await queue_repo.load(ROOM, "B")
+    for t in b.waiting:
+        assert t.queue_label == "B"
+        # Номер талона исторический (A3/A4) — он же используется в БД-истории.
+        assert t.num.startswith("A")
+
+
+# ---------------------------------------------------------------------------
+# remove_queue redistribute
+# ---------------------------------------------------------------------------
+
+
+async def test_remove_queue_redistributes_to_remaining(queue_repo, room_service, visitor_service):
+    await _open_room(queue_repo)
+    await room_service.add_queue(ROOM, OWNER)  # B
+    for i in range(3):
+        await _take(visitor_service, f"u{i}", hint="B")
+
+    await room_service.remove_queue(ROOM, "B", OWNER)
+
+    labels = [q.label for q in await queue_repo.load_all(ROOM)]
+    assert "B" not in labels
+    a = await queue_repo.load(ROOM, "A")
+    assert len(a.waiting) == 3
+    for t in a.waiting:
+        assert t.queue_label == "A"
+
+
+# ---------------------------------------------------------------------------
+# stats + avg serve (раньше среднее никогда не считалось)
+# ---------------------------------------------------------------------------
+
+
+async def test_full_cycle_updates_stats_and_avg(queue_repo, room_service, visitor_service):
+    await _open_room(queue_repo)
+    for i in range(3):
+        await _take(visitor_service, f"u{i}", hint="A")
+
+    for _ in range(3):
+        await room_service.call_next(ROOM, "A", OWNER)
+        await room_service.complete_serving(ROOM, "A", OWNER)
+
+    stats = await room_service.get_stats(ROOM)
+    assert stats["total_tickets"] == 3
+    assert stats["completed"] == 3
+
+    # Среднее время обслуживания теперь действительно пишется в Redis.
+    avg = await queue_repo.get_avg_serve(ROOM)
+    assert avg is not None
+    assert avg >= 0
+
+
+# ---------------------------------------------------------------------------
+# owner check
+# ---------------------------------------------------------------------------
+
+
+async def test_admin_mutation_rejects_wrong_owner(queue_repo, room_service):
+    from fastapi import HTTPException
+
+    await _open_room(queue_repo)
+    with pytest.raises(HTTPException) as exc:
+        await room_service.add_queue(ROOM, "not_the_owner")
+    assert exc.value.status_code == 403

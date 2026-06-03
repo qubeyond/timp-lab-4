@@ -34,7 +34,7 @@ async def call_next(
 ):
     _check_room(payload.room_id.upper(), user)
 
-    result = await room_service.call_next(payload.room_id.upper(), payload.queue_label)
+    result = await room_service.call_next(payload.room_id.upper(), payload.queue_label, user["sub"])
 
     return CallNextResponse(queue_label=result.queue_label, ticket=result.ticket)
 
@@ -48,7 +48,7 @@ async def complete_serving(
 ):
     _check_room(payload.room_id.upper(), user)
 
-    await room_service.complete_serving(payload.room_id.upper(), payload.queue_label)
+    await room_service.complete_serving(payload.room_id.upper(), payload.queue_label, user["sub"])
 
     return CompleteServingResponse()
 
@@ -62,7 +62,7 @@ async def add_queue(
 ):
     _check_room(payload.room_id.upper(), user)
 
-    result = await room_service.add_queue(payload.room_id.upper())
+    result = await room_service.add_queue(payload.room_id.upper(), user["sub"])
 
     return QueueMutationResponse(status="created", queue_label=result.queue_label)
 
@@ -76,7 +76,9 @@ async def remove_queue(
 ):
     _check_room(payload.room_id.upper(), user)
 
-    result = await room_service.remove_queue(payload.room_id.upper(), payload.queue_label)
+    result = await room_service.remove_queue(
+        payload.room_id.upper(), payload.queue_label, user["sub"]
+    )
 
     return QueueMutationResponse(status="removed", queue_label=result.queue_label)
 

@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 from fastapi import HTTPException
 
-from src.domain.entities import DEFAULT_QUEUE, QUEUE_LABELS, Queue, Room
+from src.domain.entities import DEFAULT_QUEUE, Queue, Room
 from src.domain.repositories import (
     EventPublisher,
     QueueRepository,
@@ -49,11 +49,25 @@ class RoomService:
 
         raise HTTPException(status_code=500, detail="Ошибка генерации ID комнаты")
 
-    async def close_room(self, room_id: str, user_id: str) -> RoomClosed:
+    @staticmethod
+    def _room_from(room_id: str, queues: list[Queue]) -> Room:
+        # Источник истины правил — доменная сущность Room. Живое состояние
+        # очередей лежит в Redis, поэтому собираем Room из актуальных меток
+        # и делегируем ей решения (можно ли добавить/удалить, какая метка следующая).
+        return Room(room_id=room_id, owner_id="", queue_labels=[q.label for q in queues])
+
+    async def _assert_owner(self, room_id: str, user_id: str) -> None:
+        # Двойная проверка владельца: роль admin уже проверена в токене, но
+        # токен живёт дольше, чем комната в Redis (TTL), и 6-символьный ID
+        # может быть переиспользован новой комнатой. Сверяемся с владельцем
+        # в Redis, чтобы старый токен не управлял чужой комнатой.
         owner = await self._qr.get_owner(room_id)
 
-        if owner != user_id:
+        if owner is None or owner != user_id:
             raise HTTPException(status_code=403, detail="Доступ запрещён")
+
+    async def close_room(self, room_id: str, user_id: str) -> RoomClosed:
+        await self._assert_owner(room_id, user_id)
 
         await self._pub.publish(room_id, {"type": "update", "data": {"room_closed": True}})
         await self._qr.delete_all(room_id)
@@ -63,73 +77,83 @@ class RoomService:
 
         return RoomClosed(status="closed")
 
-    async def add_queue(self, room_id: str) -> QueueAdded:
-        queues = await self._qr.load_all(room_id)
-        existing_labels = [q.label for q in queues]
-        available = [lbl for lbl in QUEUE_LABELS if lbl not in existing_labels]
+    async def add_queue(self, room_id: str, user_id: str) -> QueueAdded:
+        await self._assert_owner(room_id, user_id)
 
-        if not available:
-            raise HTTPException(status_code=400, detail="Достигнут максимум очередей")
+        async with self._qr.lock(room_id):
+            queues = await self._qr.load_all(room_id)
+            room = self._room_from(room_id, queues)
 
-        label = available[0]
-        new_queue = Queue(label=label, room_id=room_id)
-        longest = max(queues, key=lambda q: len(q.waiting), default=None)
+            if not room.can_add_queue():
+                raise HTTPException(status_code=400, detail="Достигнут максимум очередей")
 
-        if longest and longest.waiting:
-            n = len(longest.waiting)
-            move_count = n // 2 if n > 1 else 1
-            moved = longest.waiting[-move_count:]
-            longest.waiting = longest.waiting[:-move_count]
+            try:
+                label = room.next_queue_label()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Достигнут максимум очередей") from None
 
-            for t in moved:
-                t.queue_label = label
+            new_queue = Queue(label=label, room_id=room_id)
+            longest = max(queues, key=lambda q: len(q.waiting), default=None)
 
-            new_queue.waiting = moved
-            new_queue.ticket_counter = len(moved)
-            await self._qr.save(longest)
+            # Перебалансировка — доменная политика очереди: половина с хвоста
+            # самой длинной переезжает в новую. При <2 ожидающих перенос пустой.
+            if longest is not None:
+                moved = longest.split_off_half()
+                if moved:
+                    new_queue.absorb(moved)
+                    await self._qr.save(longest)
 
-        await self._qr.save(new_queue)
+            await self._qr.save(new_queue)
+
         await self._pub.publish(room_id, {"type": "update"})
 
         return QueueAdded(queue_label=label)
 
-    async def remove_queue(self, room_id: str, label: str) -> QueueRemoved:
-        queues = await self._qr.load_all(room_id)
+    async def remove_queue(self, room_id: str, label: str, user_id: str) -> QueueRemoved:
+        await self._assert_owner(room_id, user_id)
 
-        if len(queues) <= 1:
-            raise HTTPException(status_code=400, detail="Нельзя удалить единственную очередь")
+        async with self._qr.lock(room_id):
+            queues = await self._qr.load_all(room_id)
+            room = self._room_from(room_id, queues)
 
-        target = next((q for q in queues if q.label == label), None)
+            if not room.can_remove_queue(label):
+                if label not in room.queue_labels:
+                    raise HTTPException(status_code=404, detail="Очередь не найдена")
+                raise HTTPException(status_code=400, detail="Нельзя удалить единственную очередь")
 
-        if target is None:
-            raise HTTPException(status_code=404, detail="Очередь не найдена")
+            target = next(q for q in queues if q.label == label)
+            remaining = [q for q in queues if q.label != label]
 
-        remaining = [q for q in queues if q.label != label]
+            # Перераспределяем ожидающих удаляемой очереди в самые короткие из оставшихся.
+            for ticket in target.waiting:
+                shortest = min(remaining, key=lambda q: len(q.waiting))
+                shortest.absorb([ticket])
 
-        for ticket in target.waiting:
-            shortest = min(remaining, key=lambda q: len(q.waiting))
-            shortest.waiting.append(ticket)
+            for q in remaining:
+                await self._qr.save(q)
 
-        for q in remaining:
-            await self._qr.save(q)
+            await self._qr.delete(room_id, label)
 
-        await self._qr.delete(room_id, label)
         await self._pub.publish(room_id, {"type": "update"})
 
         return QueueRemoved(queue_label=label)
 
-    async def call_next(self, room_id: str, label: str) -> NextCalled:
-        queue = await self._qr.load(room_id, label)
+    async def call_next(self, room_id: str, label: str, user_id: str) -> NextCalled:
+        await self._assert_owner(room_id, user_id)
 
-        if queue is None:
-            raise HTTPException(status_code=404, detail="Очередь не найдена")
+        async with self._qr.lock(room_id):
+            queue = await self._qr.load(room_id, label)
 
-        try:
-            ticket = queue.call_next(datetime.now(UTC))
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Очередь пуста") from None
+            if queue is None:
+                raise HTTPException(status_code=404, detail="Очередь не найдена")
 
-        await self._qr.save(queue)
+            try:
+                ticket = queue.call_next(datetime.now(UTC))
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Очередь пуста") from None
+
+            await self._qr.save(queue)
+
         await self._tr.mark_called(room_id, label, ticket.num, datetime.now(UTC))
         await self._pub.publish(room_id, {"type": "update"})
 
@@ -137,21 +161,31 @@ class RoomService:
 
         return NextCalled(queue_label=label, ticket=ticket.num)
 
-    async def complete_serving(self, room_id: str, label: str) -> None:
-        queue = await self._qr.load(room_id, label)
+    async def complete_serving(self, room_id: str, label: str, user_id: str) -> None:
+        await self._assert_owner(room_id, user_id)
 
-        if queue is None:
-            raise HTTPException(status_code=404, detail="Очередь не найдена")
+        async with self._qr.lock(room_id):
+            queue = await self._qr.load(room_id, label)
 
-        try:
-            ticket = queue.complete_serving()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Обслуживание не активно") from None
+            if queue is None:
+                raise HTTPException(status_code=404, detail="Очередь не найдена")
 
-        now = datetime.now(UTC)
+            serving_since = queue.serving_since
 
-        await self._qr.save(queue)
+            try:
+                ticket = queue.complete_serving()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Обслуживание не активно") from None
+
+            now = datetime.now(UTC)
+            await self._qr.save(queue)
+
         await self._tr.mark_completed(room_id, label, ticket.num, now)
+
+        if serving_since is not None:
+            serve_seconds = int((now - serving_since).total_seconds())
+            await self._qr.update_avg_serve(room_id, max(serve_seconds, 0))
+
         await self._pub.publish(room_id, {"type": "update"})
 
     async def get_stats(self, room_id: str) -> dict:

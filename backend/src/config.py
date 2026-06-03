@@ -1,5 +1,14 @@
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Заведомо небезопасные значения секрета, которые недопустимы на проде.
+_WEAK_JWT_SECRETS = {
+    "dev-secret-change-in-prod",
+    "change_me_to_a_random_64_char_string",
+    "secret",
+    "changeme",
+}
+_MIN_JWT_SECRET_LEN = 32  # байт, рекомендация RFC 7518 для HS256
 
 
 class Settings(BaseSettings):
@@ -30,6 +39,23 @@ class Settings(BaseSettings):
     # app
     debug: bool = Field(False, alias="DEBUG")
     cors_origins_raw: str = Field("*", alias="CORS_ORIGINS")
+
+    @model_validator(mode="after")
+    def _validate_jwt_secret(self) -> Settings:
+        # В проде (DEBUG=false) запрещаем дефолтные/короткие секреты —
+        # иначе любой, кто знает плейсхолдер, подделает админ-токен.
+        if not self.debug:
+            if self.jwt_secret in _WEAK_JWT_SECRETS:
+                raise ValueError(
+                    "JWT_SECRET содержит небезопасное значение по умолчанию. "
+                    "Задайте случайный секрет (например, `openssl rand -hex 32`)."
+                )
+            if len(self.jwt_secret.encode("utf-8")) < _MIN_JWT_SECRET_LEN:
+                raise ValueError(
+                    f"JWT_SECRET слишком короткий: нужно не менее {_MIN_JWT_SECRET_LEN} "
+                    "байт для HS256."
+                )
+        return self
 
     @computed_field
     @property

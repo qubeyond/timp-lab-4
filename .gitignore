@@ -16,5 +16,9 @@ node_modules/
 dist/
 *.local
 
-# Credentials
+# Local
 CREDITS.md
+report.md
+*.docx
+
+.claude/

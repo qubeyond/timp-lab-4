@@ -104,6 +104,27 @@ class Queue:
             self.serving = None
         return ticket
 
+    def split_off_half(self) -> list[Ticket]:
+        """Снять половину (с округлением вниз) ожидающих с хвоста очереди.
+
+        Политика ребалансировки при создании новой очереди. При 0 или 1
+        ожидающем возвращает пустой список — переносить нечего, очередь
+        остаётся непустой/нетронутой.
+        """
+        move_count = len(self.waiting) // 2
+        if move_count == 0:
+            return []
+        moved = self.waiting[-move_count:]
+        self.waiting = self.waiting[:-move_count]
+        return moved
+
+    def absorb(self, tickets: list[Ticket]) -> None:
+        """Принять перенесённые из другой очереди талоны, переметив их."""
+        for t in tickets:
+            t.queue_label = self.label
+            self.waiting.append(t)
+        self.ticket_counter += len(tickets)
+
 
 @dataclass
 class Room:

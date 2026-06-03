@@ -1,5 +1,6 @@
 import contextlib
 import secrets
+from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
@@ -11,11 +12,17 @@ from src.infrastructure.redis.client import (
     queue_hash_key,
     queue_list_key,
     room_avg_serve_key,
+    room_lock_key,
     room_owner_key,
     room_queues_key,
     room_serve_count_key,
     user_queue_key,
 )
+
+# Параметры блокировки на комнату. timeout — авто-снятие, если держатель упал;
+# blocking_timeout — сколько ждём очереди на лок, прежде чем сдаться.
+_LOCK_TIMEOUT = 5.0
+_LOCK_BLOCKING_TIMEOUT = 5.0
 
 
 def generate_room_id() -> str:
@@ -26,6 +33,17 @@ class RedisQueueRepository:
     def __init__(self, redis: aioredis.Redis, queue_ttl: int) -> None:
         self._r = redis
         self._ttl = queue_ttl
+
+    def lock(self, room_id: str) -> AbstractAsyncContextManager[None]:
+        # Нативный Redis-лок: сериализует мутации одной комнаты, чтобы
+        # параллельные load→mutate→save не затирали друг друга
+        # (двойной вызов талона, потеря людей при одновременном входе).
+        return self._r.lock(
+            room_lock_key(room_id),
+            timeout=_LOCK_TIMEOUT,
+            blocking=True,
+            blocking_timeout=_LOCK_BLOCKING_TIMEOUT,
+        )
 
     async def room_exists(self, room_id: str) -> bool:
         return bool(await self._r.exists(room_owner_key(room_id)))
@@ -107,10 +125,14 @@ class RedisQueueRepository:
 
         serving = queue.serving
 
-        if serving and queue.serving_since:
+        # started_at — epoch-секунды начала обслуживания. Источник истины —
+        # queue.serving_since. Если по какой-то причине его нет (объект собран
+        # вручную без времени), сохраняем уже записанное значение, чтобы не
+        # обнулить отсчёт у активного приёма. Без обслуживания — пустая строка.
+        if serving and queue.serving_since is not None:
             started_at = str(queue.serving_since.timestamp())
         elif serving:
-            started_at = await self._r.hget(ck, "started_at") or ""
+            started_at = (await self._r.hget(ck, "started_at")) or ""
         else:
             started_at = ""
 
@@ -181,19 +203,34 @@ class RedisQueueRepository:
         val = await self._r.get(room_avg_serve_key(room_id))
         return int(val) if val else None
 
-    async def update_avg_serve(self, room_id: str, serve_seconds: int) -> None:
-        avg_key = room_avg_serve_key(room_id)
-        cnt_key = room_serve_count_key(room_id)
-        prev_avg = await self._r.get(avg_key)
-        prev_cnt = await self._r.get(cnt_key)
-        count = int(prev_cnt) + 1 if prev_cnt else 1
-        new_avg = (
-            serve_seconds
-            if prev_avg is None
-            else int(float(prev_avg) + (serve_seconds - float(prev_avg)) / count)
-        )
+    # Атомарный пересчёт кумулятивного среднего на стороне Redis.
+    # Без этого два одновременных complete_serving в одной комнате читают
+    # одно и то же prev_avg/prev_cnt и затирают результат друг друга.
+    _UPDATE_AVG_LUA = """
+    local avg_key = KEYS[1]
+    local cnt_key = KEYS[2]
+    local serve = tonumber(ARGV[1])
+    local ttl = tonumber(ARGV[2])
+    local count = tonumber(redis.call('GET', cnt_key) or '0') + 1
+    local prev_avg = redis.call('GET', avg_key)
+    local new_avg
+    if prev_avg == false then
+        new_avg = serve
+    else
+        prev_avg = tonumber(prev_avg)
+        new_avg = math.floor(prev_avg + (serve - prev_avg) / count)
+    end
+    redis.call('SET', avg_key, new_avg, 'EX', ttl)
+    redis.call('SET', cnt_key, count, 'EX', ttl)
+    return new_avg
+    """
 
-        async with self._r.pipeline() as pipe:
-            pipe.set(avg_key, new_avg, ex=self._ttl)
-            pipe.set(cnt_key, count, ex=self._ttl)
-            await pipe.execute()
+    async def update_avg_serve(self, room_id: str, serve_seconds: int) -> None:
+        await self._r.eval(
+            self._UPDATE_AVG_LUA,
+            2,
+            room_avg_serve_key(room_id),
+            room_serve_count_key(room_id),
+            serve_seconds,
+            self._ttl,
+        )

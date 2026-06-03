@@ -311,6 +311,64 @@ def test_queue_total_length_counts_serving():
 
 
 # ---------------------------------------------------------------------------
+# Queue.split_off_half / absorb (политика ребалансировки)
+# ---------------------------------------------------------------------------
+
+
+def _q_with(label: str, n: int) -> Queue:
+    q = Queue(label=label, room_id="R1")
+    for i in range(n):
+        q.enqueue(f"u{i}")
+    return q
+
+
+def test_split_off_half_empty_queue_moves_nothing():
+    q = _q_with("A", 0)
+    assert q.split_off_half() == []
+    assert len(q.waiting) == 0
+
+
+def test_split_off_half_single_waiting_moves_nothing():
+    # Регрессия: единственный ожидающий НЕ должен переноситься (1 // 2 == 0).
+    q = _q_with("A", 1)
+    moved = q.split_off_half()
+    assert moved == []
+    assert len(q.waiting) == 1
+
+
+def test_split_off_half_even_splits_evenly():
+    q = _q_with("A", 4)
+    moved = q.split_off_half()
+    assert len(moved) == 2
+    assert len(q.waiting) == 2
+
+
+def test_split_off_half_odd_keeps_majority_in_source():
+    q = _q_with("A", 5)
+    moved = q.split_off_half()
+    assert len(moved) == 2
+    assert len(q.waiting) == 3
+
+
+def test_split_off_half_takes_from_tail():
+    q = _q_with("A", 4)  # u0,u1,u2,u3
+    moved = q.split_off_half()
+    assert [t.user_id for t in moved] == ["u2", "u3"]
+    assert [t.user_id for t in q.waiting] == ["u0", "u1"]
+
+
+def test_absorb_relabels_and_counts():
+    src = _q_with("A", 2)
+    dst = Queue(label="B", room_id="R1")
+    moved = src.waiting[:]
+    dst.absorb(moved)
+    assert len(dst.waiting) == 2
+    assert dst.ticket_counter == 2
+    for t in dst.waiting:
+        assert t.queue_label == "B"
+
+
+# ---------------------------------------------------------------------------
 # Room
 # ---------------------------------------------------------------------------
 

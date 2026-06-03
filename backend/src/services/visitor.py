@@ -34,50 +34,56 @@ class VisitorService:
             token = self._auth.create_token(user_id, role="admin", room_id=room_id)
             return TicketTaken(is_admin=True, room_id=room_id, access_token=token)
 
-        queues = await self._qr.load_all(room_id)
+        # Лок на комнату: иначе параллельные входы читают одно состояние,
+        # выбирают одну очередь и затирают талоны друг друга (теряются люди).
+        async with self._qr.lock(room_id):
+            queues = await self._qr.load_all(room_id)
 
-        for queue in queues:
-            if queue.has_user(user_id):
-                ticket = queue.find_ticket(user_id)
-                pos = queue.position(user_id)
+            for queue in queues:
+                if queue.has_user(user_id):
+                    ticket = queue.find_ticket(user_id)
+                    pos = queue.position(user_id)
 
-                return TicketTaken(
-                    is_admin=False,
-                    queue_label=queue.label,
-                    ticket=ticket.num if ticket else None,
-                    position=pos,
-                )
+                    return TicketTaken(
+                        is_admin=False,
+                        queue_label=queue.label,
+                        ticket=ticket.num if ticket else None,
+                        position=pos,
+                    )
 
-        if queue_label_hint:
-            queue = next((q for q in queues if q.label == queue_label_hint), None)
-            if queue is None:
-                raise HTTPException(status_code=404, detail="Очередь не существует")
-        else:
-            queue = min(queues, key=lambda q: q.total_length())
+            if queue_label_hint:
+                queue = next((q for q in queues if q.label == queue_label_hint), None)
+                if queue is None:
+                    raise HTTPException(status_code=404, detail="Очередь не существует")
+            else:
+                queue = min(queues, key=lambda q: q.total_length())
 
-        ticket = queue.enqueue(user_id)
+            ticket = queue.enqueue(user_id)
+            await self._qr.save(queue)
+            position = queue.position(user_id)
+            queue_label = queue.label
 
-        await self._qr.save(queue)
         await self._tr.save(ticket)
         await self._pub.publish(room_id, {"type": "update"})
 
-        logger.info("Ticket %s (queue %s) issued in room %s", ticket.num, queue.label, room_id)
+        logger.info("Ticket %s (queue %s) issued in room %s", ticket.num, queue_label, room_id)
 
         return TicketTaken(
             is_admin=False,
-            queue_label=queue.label,
+            queue_label=queue_label,
             ticket=ticket.num,
-            position=queue.position(user_id),
+            position=position,
         )
 
     async def leave_queue(self, room_id: str, user_id: str) -> QueueLeft:
-        queues = await self._qr.load_all(room_id)
+        async with self._qr.lock(room_id):
+            queues = await self._qr.load_all(room_id)
 
-        for queue in queues:
-            if queue.has_user(user_id):
-                queue.dequeue(user_id)
-                await self._qr.save(queue)
-                break
+            for queue in queues:
+                if queue.has_user(user_id):
+                    queue.dequeue(user_id)
+                    await self._qr.save(queue)
+                    break
 
         await self._pub.publish(room_id, {"type": "update"})
 

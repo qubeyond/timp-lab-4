@@ -1,3 +1,4 @@
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Protocol
 
@@ -21,6 +22,9 @@ class QueueRepository(Protocol):
     async def delete_all(self, room_id: str) -> None: ...
     async def get_avg_serve(self, room_id: str) -> int | None: ...
     async def update_avg_serve(self, room_id: str, serve_seconds: int) -> None: ...
+    def lock(self, room_id: str) -> AbstractAsyncContextManager[None]:
+        """Эксклюзивная блокировка на комнату для атомарного read-modify-write."""
+        ...
 
 
 class TicketRepository(Protocol):

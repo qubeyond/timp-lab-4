@@ -1,147 +1,151 @@
+from datetime import UTC, datetime
+
 import pytest
+
+from src.domain.entities import Queue
 
 pytestmark = pytest.mark.integration
 
 ROOM = "TESTROOM"
 
 
-async def test_room_not_exists_initially(repo):
-    assert not await repo.room_exists(ROOM)
+# ---------------------------------------------------------------------------
+# room / owner
+# ---------------------------------------------------------------------------
 
 
-async def test_init_queue_creates_room(repo):
-    await repo.init_queue(ROOM, "A")
-    assert await repo.room_exists(ROOM)
+async def test_room_not_exists_initially(queue_repo):
+    assert await queue_repo.room_exists(ROOM) is False
 
 
-async def test_get_queues_default(repo):
-    await repo.init_queue(ROOM, "A")
-    assert await repo.get_queues(ROOM) == ["A"]
+async def test_set_owner_makes_room_exist(queue_repo):
+    await queue_repo.set_owner(ROOM, "fp123")
+    assert await queue_repo.room_exists(ROOM) is True
+    assert await queue_repo.get_owner(ROOM) == "fp123"
 
 
-async def test_set_and_get_owner(repo):
-    await repo.set_owner(ROOM, "fp123")
-    assert await repo.get_owner(ROOM) == "fp123"
+# ---------------------------------------------------------------------------
+# save / load round-trip
+# ---------------------------------------------------------------------------
 
 
-async def test_take_ticket_increments_counter(repo):
-    await repo.init_queue(ROOM, "A")
-    code, num = await repo.take_ticket(ROOM, "A", "user1")
-    assert code == "A1"
-    assert num == 1
-    code2, num2 = await repo.take_ticket(ROOM, "A", "user2")
-    assert code2 == "A2"
-    assert num2 == 2
+async def test_save_and_load_waiting(queue_repo):
+    q = Queue(label="A", room_id=ROOM)
+    q.enqueue("u1")
+    q.enqueue("u2")
+    await queue_repo.save(q)
+
+    loaded = await queue_repo.load(ROOM, "A")
+    assert loaded is not None
+    assert [t.user_id for t in loaded.waiting] == ["u1", "u2"]
+    assert [t.num for t in loaded.waiting] == ["A1", "A2"]
+    assert loaded.ticket_counter == 2
 
 
-async def test_get_existing_ticket_returns_position(repo):
-    await repo.init_queue(ROOM, "A")
-    await repo.take_ticket(ROOM, "A", "user1")
-    await repo.take_ticket(ROOM, "A", "user2")
-    result = await repo.get_existing_ticket(ROOM, "user1")
-    assert result is not None
-    label, ticket, pos = result
-    assert label == "A"
-    assert ticket == "A1"
-    assert pos == 1
+async def test_load_missing_queue_returns_none(queue_repo):
+    assert await queue_repo.load(ROOM, "Z") is None
 
 
-async def test_pick_shortest_queue_avoids_serving(repo):
-    await repo.init_queue(ROOM, "A")
-    await repo.init_queue(ROOM, "B")
-    await repo.take_ticket(ROOM, "A", "user1")
-    await repo.call_next(ROOM, "A")
-    label = await repo.pick_shortest_queue(ROOM)
-    assert label == "B"
+async def test_save_preserves_serving_and_started_at(queue_repo):
+    q = Queue(label="A", room_id=ROOM)
+    q.enqueue("u1")
+    started = datetime.now(UTC)
+    q.call_next(started)
+    await queue_repo.save(q)
+
+    loaded = await queue_repo.load(ROOM, "A")
+    assert loaded.serving is not None
+    assert loaded.serving.user_id == "u1"
+    assert loaded.serving_since is not None
+    # Регрессия started_at: время старта обслуживания должно сохраняться (±1с).
+    assert abs((loaded.serving_since - started).total_seconds()) < 1
 
 
-async def test_call_next_raises_on_empty(repo):
-    await repo.init_queue(ROOM, "A")
-    with pytest.raises(ValueError, match="empty"):
-        await repo.call_next(ROOM, "A")
+async def test_resave_serving_without_serving_since_keeps_started_at(queue_repo):
+    """Регрессия: повторное сохранение serving-очереди не должно обнулять started_at."""
+    q = Queue(label="A", room_id=ROOM)
+    q.enqueue("u1")
+    started = datetime.now(UTC)
+    q.call_next(started)
+    await queue_repo.save(q)
+
+    # Эмулируем объект, у которого serving есть, а serving_since утрачен.
+    q2 = await queue_repo.load(ROOM, "A")
+    q2.serving_since = None
+    await queue_repo.save(q2)
+
+    reloaded = await queue_repo.load(ROOM, "A")
+    assert reloaded.serving is not None
+    assert reloaded.serving_since is not None
+    assert abs((reloaded.serving_since - started).total_seconds()) < 1
 
 
-async def test_call_next_moves_to_serving(repo):
-    await repo.init_queue(ROOM, "A")
-    await repo.take_ticket(ROOM, "A", "user1")
-    served_user, ticket, _ = await repo.call_next(ROOM, "A")
-    assert served_user == "user1"
-    assert ticket == "A1"
+async def test_load_all_sorted(queue_repo):
+    await queue_repo.save(Queue(label="B", room_id=ROOM))
+    await queue_repo.save(Queue(label="A", room_id=ROOM))
+    queues = await queue_repo.load_all(ROOM)
+    assert [q.label for q in queues] == ["A", "B"]
 
 
-async def test_complete_serving_raises_if_not_serving(repo):
-    await repo.init_queue(ROOM, "A")
-    with pytest.raises(ValueError, match="not_serving"):
-        await repo.complete_serving(ROOM, "A")
+# ---------------------------------------------------------------------------
+# delete
+# ---------------------------------------------------------------------------
 
 
-async def test_complete_serving_returns_serve_seconds(repo):
-    await repo.init_queue(ROOM, "A")
-    await repo.take_ticket(ROOM, "A", "user1")
-    await repo.call_next(ROOM, "A")
-    ticket, served_user, _, serve_seconds = await repo.complete_serving(ROOM, "A")
-    assert ticket == "A1"
-    assert served_user == "user1"
-    assert serve_seconds >= 0
+async def test_delete_removes_queue(queue_repo):
+    await queue_repo.save(Queue(label="A", room_id=ROOM))
+    await queue_repo.save(Queue(label="B", room_id=ROOM))
+    await queue_repo.delete(ROOM, "B")
+    labels = [q.label for q in await queue_repo.load_all(ROOM)]
+    assert labels == ["A"]
 
 
-async def test_leave_queue_removes_user(repo):
-    await repo.init_queue(ROOM, "A")
-    await repo.take_ticket(ROOM, "A", "user1")
-    await repo.leave_queue(ROOM, "user1")
-    assert await repo.get_existing_ticket(ROOM, "user1") is None
+async def test_delete_all_cleans_room(queue_repo):
+    await queue_repo.set_owner(ROOM, "fp")
+    q = Queue(label="A", room_id=ROOM)
+    q.enqueue("u1")
+    await queue_repo.save(q)
+
+    await queue_repo.delete_all(ROOM)
+
+    assert await queue_repo.room_exists(ROOM) is False
+    assert await queue_repo.get_owner(ROOM) is None
+    assert await queue_repo.load_all(ROOM) == []
 
 
-async def test_add_queue_rebalances(repo):
-    await repo.init_queue(ROOM, "A")
-    for i in range(4):
-        await repo.take_ticket(ROOM, "A", f"user{i}")
-    await repo.add_queue(ROOM, "B")
-    queues = await repo.get_queues(ROOM)
-    assert "B" in queues
-    from src.infrastructure.redis.client import queue_list_key
-
-    a_len = await repo._r.llen(queue_list_key(ROOM, "A"))
-    b_len = await repo._r.llen(queue_list_key(ROOM, "B"))
-    assert b_len == 2
-    assert a_len == 2
+# ---------------------------------------------------------------------------
+# avg serve (атомарный Lua)
+# ---------------------------------------------------------------------------
 
 
-async def test_remove_queue_redistributes(repo):
-    await repo.init_queue(ROOM, "A")
-    await repo.init_queue(ROOM, "B")
-    await repo.take_ticket(ROOM, "A", "user1")
-    await repo.take_ticket(ROOM, "B", "user2")
-    await repo.take_ticket(ROOM, "B", "user3")
-    ok = await repo.remove_queue(ROOM, "B")
-    assert ok is True
-    from src.infrastructure.redis.client import queue_list_key
-
-    a_len = await repo._r.llen(queue_list_key(ROOM, "A"))
-    assert a_len == 3
+async def test_update_avg_serve_first_value(queue_repo):
+    await queue_repo.update_avg_serve(ROOM, 100)
+    assert await queue_repo.get_avg_serve(ROOM) == 100
 
 
-async def test_remove_last_queue_returns_false(repo):
-    await repo.init_queue(ROOM, "A")
-    assert await repo.remove_queue(ROOM, "A") is False
+async def test_update_avg_serve_cumulative_average(queue_repo):
+    await queue_repo.update_avg_serve(ROOM, 100)
+    await queue_repo.update_avg_serve(ROOM, 200)
+    # Кумулятивное среднее: 100, затем 100 + (200-100)/2 = 150.
+    assert await queue_repo.get_avg_serve(ROOM) == 150
 
 
-async def test_update_avg_serve_exponential_average(repo):
-    await repo.update_avg_serve(ROOM, 100)
-    from src.infrastructure.redis.client import room_avg_serve_key
-
-    val1 = int(await repo._r.get(room_avg_serve_key(ROOM)))
-    assert val1 == 100
-
-    await repo.update_avg_serve(ROOM, 200)
-    val2 = int(await repo._r.get(room_avg_serve_key(ROOM)))
-    assert val2 == int(0.3 * 200 + 0.7 * 100)
+async def test_get_avg_serve_none_when_unset(queue_repo):
+    assert await queue_repo.get_avg_serve(ROOM) is None
 
 
-async def test_close_room_keys_cleans_up(repo):
-    await repo.set_owner(ROOM, "fp")
-    await repo.init_queue(ROOM, "A")
-    await repo.take_ticket(ROOM, "A", "user1")
-    await repo.close_room_keys(ROOM)
-    assert not await repo.room_exists(ROOM)
-    assert await repo.get_owner(ROOM) is None
+# ---------------------------------------------------------------------------
+# TTL
+# ---------------------------------------------------------------------------
+
+
+async def test_save_sets_ttl(queue_repo, redis_client):
+    from src.infrastructure.redis.client import queue_current_key, queue_list_key
+
+    q = Queue(label="A", room_id=ROOM)
+    q.enqueue("u1")
+    await queue_repo.save(q)
+
+    for key in (queue_list_key(ROOM, "A"), queue_current_key(ROOM, "A")):
+        ttl = await redis_client.ttl(key)
+        assert ttl > 0, f"{key} has no TTL"

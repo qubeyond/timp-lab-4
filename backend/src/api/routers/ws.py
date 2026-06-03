@@ -56,7 +56,10 @@ async def websocket_endpoint(
                 if data == "ping":
                     await websocket.send_text("pong")
         except WebSocketDisconnect:
-            publisher.disconnect(room_id, websocket)
+            pass
         except Exception as e:
             logger.error("WS error: %s", e)
+        finally:
+            # Гарантированно снимаем подписку и отменяем pubsub-таск,
+            # даже если соединение упало неожиданно.
             publisher.disconnect(room_id, websocket)

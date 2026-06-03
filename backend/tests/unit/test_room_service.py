@@ -275,6 +275,49 @@ async def test_complete_serving_publishes_update(
     mock_publisher.publish.assert_awaited_once()
 
 
+async def test_complete_serving_updates_avg(client, admin_headers, mock_queue_repo):
+    """Регрессия: complete_serving должен обновлять среднее время обслуживания.
+
+    Раньше update_avg_serve не вызывался нигде — среднее всегда оставалось 0.
+    """
+    from datetime import timedelta
+
+    ticket = Ticket(num="A1", user_id="u1", queue_label="A", room_id="ROOM01")
+    started = datetime.now(UTC) - timedelta(seconds=42)
+    mock_queue_repo.load.return_value = Queue(
+        label="A", room_id="ROOM01", serving=ticket, serving_since=started
+    )
+
+    await client.post(
+        "/api/v1/admin/complete",
+        json={"room_id": "ROOM01", "queue_label": "A"},
+        headers=admin_headers,
+    )
+
+    mock_queue_repo.update_avg_serve.assert_awaited_once()
+    args = mock_queue_repo.update_avg_serve.call_args[0]
+    assert args[0] == "ROOM01"
+    assert args[1] >= 41  # ~42 секунды обслуживания
+
+
+async def test_complete_serving_without_started_at_skips_avg(
+    client, admin_headers, mock_queue_repo
+):
+    """Если serving_since отсутствует — среднее не обновляем (нечего считать)."""
+    ticket = Ticket(num="A1", user_id="u1", queue_label="A", room_id="ROOM01")
+    mock_queue_repo.load.return_value = Queue(
+        label="A", room_id="ROOM01", serving=ticket, serving_since=None
+    )
+
+    await client.post(
+        "/api/v1/admin/complete",
+        json={"room_id": "ROOM01", "queue_label": "A"},
+        headers=admin_headers,
+    )
+
+    mock_queue_repo.update_avg_serve.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # get_state
 # ---------------------------------------------------------------------------
